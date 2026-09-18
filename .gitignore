@@ -1,2 +1,6 @@
 docs/output/
 __pycache__/
+agents/
+CLAUDE.md
+*.DS_Store
+.DS_Store

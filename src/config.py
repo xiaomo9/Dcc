@@ -133,7 +133,7 @@ def _assign_groups_and_candidates(
     """解析 dcc.ini [groups] · 为每个 slot 填 group 名与 failover 候选列表。
 
     候选规则:同组 + 同 protocol(异协议不可互转,跳过) + 排除自己,
-    按"本槽在组内声明顺序之后 + 回绕到组首"排列 → 主模型卡住时依次尝试。
+    倒序绕圈:从本槽前一个倒着走 · 回绕到组尾 → 主模型卡住时依次尝试。
     未配 [groups] 或 slot 不在任何组 → group="" 且 candidates=[](不参与自动切换)。
     """
     if not p.has_section("groups"):
@@ -152,8 +152,8 @@ def _assign_groups_and_candidates(
         for idx, slot_id in enumerate(members):
             slot = slots[slot_id]
             slot.group = gname
-            # 本槽之后的成员 + 回绕到本槽之前的成员 · 过滤同协议 · 排除自己
-            ordered = members[idx + 1:] + members[:idx]
+            # 倒序绕圈:本槽之前成员逆序 + 回绕到本槽之后成员逆序 · 过滤同协议 · 排除自己
+            ordered = members[:idx][::-1] + members[idx + 1:][::-1]
             slot.candidates = [
                 slots[s].local_name
                 for s in ordered

@@ -46,6 +46,25 @@ def read_pid(pidfile: Path) -> int | None:
     return pid
 
 
+def _trim_proxy_log(log_path: Path, keep: int = 200) -> None:
+    """启动时把 dcc-proxy.log 裁到最后 keep 行 · 子进程接管句柄前做一次。
+
+    dcc-proxy.log 由 proxy 子进程 stdout/stderr 独占句柄,运行期无法外部滚动,
+    故只在此处(父进程 append 打开前)裁剪一次,语义同 log/exec_log/dumps 的启动清理。
+    """
+    try:
+        if not log_path.exists():
+            return
+        with log_path.open("r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        if len(lines) <= keep:
+            return
+        with log_path.open("w", encoding="utf-8") as f:
+            f.writelines(lines[-keep:])
+    except OSError:
+        pass
+
+
 def start(cfg: DccConfig) -> int:
     """后台起代理子进程 · 通过 python -m src.proxy_server 入口。"""
     # 1. 探测可用端口 (如果配置端口被非本代理占用, 则偏移)
@@ -73,6 +92,7 @@ def start(cfg: DccConfig) -> int:
     render_config_yaml(cfg)
 
     server_py = Path(__file__).parent / "proxy_server.py"
+    _trim_proxy_log(cfg.proxy_log)
     logf = cfg.proxy_log.open("ab")
     cmd = [sys.executable, str(server_py), str(cfg.proxy_config_path)]
     L.log(f"启动 dcc-proxy: {' '.join(cmd)}")

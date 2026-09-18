@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
+import time
 from pathlib import Path
 
 from .config import DccConfig, ModelSlot
@@ -58,6 +60,102 @@ def prune_dead(cfg: DccConfig) -> dict:
     if len(alive) != len(data):
         _save_instances(cfg.instances_file, alive)
     return alive
+
+
+# 代理注入的切换提示模板(见 proxy_server.py failover 主循环):
+#   [dcc] 主模型 <X> 首字节 <N>s 未响应 · 已切至 <Y>\n\n<真实回复>
+# 该行被 cc 存进 assistant 正文历史,回传时诱导模型模仿 → 无切换也自行冒这句。
+# 启动前从历史剥掉此前缀:模型无样本可抄,根治"瞎提示"。真实回复内容不动。
+_SWITCH_NOTICE_RE = re.compile(
+    r"^\[dcc\] 主模型 .+? 首字节 \d+s 未响应 · 已切至 \S+[ \t]*\n+"
+)
+_HISTORY_WRITE_GRACE = 10.0  # 秒 · 跳过近期改动过的 jsonl(可能有 cc 正在写)
+
+
+def _strip_switch_notice(text: str) -> str:
+    """剥掉 assistant 正文开头的 dcc 注入前缀(可能被模型连抄多次)。"""
+    while True:
+        new = _SWITCH_NOTICE_RE.sub("", text, count=1)
+        if new == text:
+            return text
+        text = new
+
+
+def _clean_history_line(raw: str) -> str | None:
+    """清洗一行 jsonl · 有改动返回新行,无改动返回 None(避免无谓重写)。"""
+    try:
+        rec = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    msg = rec.get("message")
+    if not isinstance(msg, dict) or msg.get("role") != "assistant":
+        return None
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return None
+    changed = False
+    for block in content:
+        if not (isinstance(block, dict) and block.get("type") == "text"):
+            continue
+        original = block.get("text")
+        if not isinstance(original, str) or "已切至" not in original:
+            continue
+        stripped = _strip_switch_notice(original)
+        if stripped != original:
+            block["text"] = stripped
+            changed = True
+    if not changed:
+        return None
+    return json.dumps(rec, ensure_ascii=False)
+
+
+def _encode_project_dir(cwd: Path) -> str:
+    """cc 的项目历史目录编码:路径里非字母数字全替换成 -(实测规则)。"""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+
+
+def clean_injected_history(cwd: Path | None = None) -> None:
+    """启动 cc 前 · 剥掉本项目历史 jsonl 里的 dcc 切换提示前缀。
+
+    只改 role=assistant 的 text block 开头的标准注入模板,真实回复不动;
+    近 _HISTORY_WRITE_GRACE 秒改动过的文件跳过(避让正在写的 cc)· 原子重写。
+    失败静默:清洗是尽力而为的优化,绝不能阻断 cc 启动。
+    """
+    try:
+        base = Path("~/.claude/projects").expanduser() / _encode_project_dir(cwd or Path.cwd())
+        if not base.is_dir():
+            return
+        now = time.time()
+        for jf in base.glob("*.jsonl"):
+            try:
+                if now - jf.stat().st_mtime < _HISTORY_WRITE_GRACE:
+                    continue
+                lines = jf.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            out: list[str] = []
+            touched = False
+            for ln in lines:
+                if not ln.strip():
+                    out.append(ln)
+                    continue
+                cleaned = _clean_history_line(ln)
+                if cleaned is None:
+                    out.append(ln)
+                else:
+                    out.append(cleaned)
+                    touched = True
+            if not touched:
+                continue
+            tmp = jf.with_suffix(jf.suffix + ".tmp")
+            try:
+                tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+                os.replace(tmp, jf)
+                L.log(f"清洗历史注入前缀 · {jf.name}")
+            except OSError:
+                tmp.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def spawn(cfg: DccConfig, slot: ModelSlot, resume: str | None, extra_args: list[str]) -> int:
@@ -109,6 +207,7 @@ def spawn(cfg: DccConfig, slot: ModelSlot, resume: str | None, extra_args: list[
     argv += extra_args
 
     _record_instance(cfg, slot, resume)
+    clean_injected_history()  # 启动前剥掉历史里的 dcc 切换提示前缀 · 防模型模仿瞎提示
     L.log(
         f"启动 CC #{slot.slot} · model={slot.local_name} · cwd={os.getcwd()}"
         + (f" · resume={resume}" if resume else "")

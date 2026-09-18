@@ -1445,32 +1445,22 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
 
 
 def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, model: dict,
-                                  messages: list[dict], extra: dict, body_original: dict) -> None:
-    """Responses /v1/responses 走 instructions/input 结构并转换为 Anthropic SSE。"""
+                                  messages: list[dict], extra: dict, body_original: dict,
+                                  candidates: list[dict] | None = None) -> None:
+    """Responses /v1/responses 走 instructions/input 结构并转换为 Anthropic SSE。
+
+    failover:candidates=[主, 候选1, 候选2...](同组同协议)。非链尾候选走软超时守卫——
+    首字节超 soft_timeout / 首帧前遇可重试 429/5xx / 连接异常 → 切下一候选;链尾(或唯一)
+    候选走原样的自 post + retry 逻辑(无候选时 chain=[主],逐字节等价改造前,零回归)。首帧
+    一旦到达即锁定当前候选,绝不再切(硬约束:换模型会污染已输出内容)。
+    """
+    chain = candidates if candidates else [model]
+    soft_timeout = CONFIG.soft_timeout
     system_text = "\n\n".join(
         m.get("content", "") for m in messages if m.get("role") == "system" and isinstance(m.get("content"), str)
     )
     input_messages = [m for m in messages if m.get("role") != "system"]
-    payload = {
-        "model": model["upstream_id"],
-        "instructions": system_text or "You are a helpful assistant.",
-        "input": _openai_messages_to_responses_input(input_messages),
-        "stream": True,
-    }
-    if extra.get("tools"):
-        payload["tools"] = _openai_tools_to_responses(extra["tools"])
-    if extra.get("tool_choice"):
-        payload["tool_choice"] = extra["tool_choice"]
-    if extra.get("max_tokens"):
-        payload["max_output_tokens"] = extra["max_tokens"]
-    if extra.get("temperature") is not None:
-        payload["temperature"] = extra["temperature"]
-
-    url = f"{model['base_url']}/responses"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {model['api_key']}"}
     req_id = getattr(handler, "_dcc_req_id", "")
-    _log(f"→ responses {model['upstream_id']} · url={url} · input={len(input_messages)}")
-    _tl("gw_req", req_id=req_id, protocol="responses", url=url, upstream_id=model["upstream_id"], payload=payload)
 
     msg_id = f"msg_{uuid.uuid4().hex[:16]}"
     estimated_input_tokens = estimate_input_tokens(body_original)
@@ -1491,15 +1481,112 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
     last_error_body: str = ""
     t0 = time.time()
 
+    primary_id = chain[0]["upstream_id"]
+    switch_notice = {"text": "", "written": False}
+    failover_to = ""          # 实际锁定的候选 upstream_id(切换才非空)
+    candidate_attempts = 0    # 尝试过的候选数(含主模型)
+
+    # ── 每候选独立三要素 · 现算(chain 内各候选各有 upstream_id/base_url/api_key)
+    def _build_responses_req(cand: dict):
+        cu = cand["upstream_id"]
+        pl = {
+            "model": cu,
+            "instructions": system_text or "You are a helpful assistant.",
+            "input": _openai_messages_to_responses_input(input_messages),
+            "stream": True,
+        }
+        if extra.get("tools"):
+            pl["tools"] = _openai_tools_to_responses(extra["tools"])
+        if extra.get("tool_choice"):
+            pl["tool_choice"] = extra["tool_choice"]
+        if extra.get("max_tokens"):
+            pl["max_output_tokens"] = extra["max_tokens"]
+        if extra.get("temperature") is not None:
+            pl["temperature"] = extra["temperature"]
+        cu_url = f"{cand['base_url']}/responses"
+        cu_headers = {"Content-Type": "application/json", "Authorization": f"Bearer {cand['api_key']}"}
+        return cu, cu_url, cu_headers, pl
+
     def close_text_block() -> None:
         nonlocal text_block_stopped
         if not text_block_stopped:
             handler.wfile.write(emit_content_block_stop(0))
             text_block_stopped = True
 
-    def _run_upstream() -> bool:
-        """返回 True=正常读完 · False=可重试的 status · 抛异常=流断。"""
-        nonlocal output_tokens, input_tokens, stop_reason, next_block_idx, emitted_any, retry_after_hint, last_error_status, last_error_body
+    def _emit_switch_notice_once():
+        """候选首个可见 delta 前注入一行切换提示 · 只写一次 · 写后置 emitted_any。"""
+        nonlocal emitted_any
+        if switch_notice["text"] and not switch_notice["written"]:
+            handler.wfile.write(emit_content_delta(0, switch_notice["text"]))
+            handler.wfile.flush()
+            switch_notice["written"] = True
+            emitted_any = True
+
+    def _consume_responses_stream(line_iter) -> None:
+        """SSE 读循环:逐行 responses event → Anthropic delta · 改外层 nonlocal 状态。
+
+        任何 emit 前置 emitted_any=True;不做 status 检查/连接管理(调用方负责)。
+        切换来的候选 · 在首个可见 delta 前经 _emit_switch_notice_once 注入提示行。
+        """
+        nonlocal output_tokens, input_tokens, stop_reason, next_block_idx, emitted_any
+        for raw_line in line_iter:
+            if not raw_line or not raw_line.strip():
+                continue
+            _tl("gw_chunk", req_id=req_id, protocol="responses", line=raw_line)
+            line = raw_line.strip()
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if line == "[DONE]":
+                break
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            event_type = event.get("type")
+            if event_type == "response.output_text.delta" and event.get("delta"):
+                _emit_switch_notice_once()
+                emitted_any = True
+                handler.wfile.write(emit_content_delta(0, event["delta"]))
+                handler.wfile.flush()
+            elif event_type == "response.output_item.added":
+                item = event.get("item") or {}
+                if item.get("type") == "function_call":
+                    _emit_switch_notice_once()
+                    close_text_block()
+                    item_id = item.get("id", "")
+                    call_id = item.get("call_id") or item_id
+                    block_idx = next_block_idx
+                    next_block_idx += 1
+                    tool_states[item_id] = {
+                        "block_idx": block_idx,
+                        "call_id": call_id,
+                        "name": item.get("name", ""),
+                    }
+                    emitted_any = True
+                    handler.wfile.write(emit_tool_use_start(block_idx, call_id, item.get("name", "")))
+                    handler.wfile.flush()
+            elif event_type == "response.function_call_arguments.delta":
+                item_id = event.get("item_id", "")
+                state = tool_states.get(item_id)
+                if state and event.get("delta"):
+                    emitted_any = True
+                    handler.wfile.write(emit_tool_input_delta(state["block_idx"], event["delta"]))
+                    handler.wfile.flush()
+            elif event_type == "response.completed":
+                usage = event.get("response", {}).get("usage") or {}
+                output_tokens = usage.get("output_tokens", 0)
+                input_tokens = usage.get("input_tokens", 0)
+                if tool_states:
+                    stop_reason = "tool_use"
+                _log(f"[responses] usage: input_tokens={input_tokens} output_tokens={output_tokens} tools={len(tool_states)}")
+
+    def _run_tail_upstream(upstream_id, url, headers, payload) -> bool:
+        """链尾(或唯一)候选:原样自 post + 状态检查 + 读循环。
+
+        返回 True=读完/已 emit 错误 · False=首帧前可重试错误(交外层 retry) · 抛异常=流断。
+        无候选时 chain=[主],走此路 → 逐字节等价改造前,零回归。
+        """
+        nonlocal emitted_any, retry_after_hint, last_error_status, last_error_body
         retry_after_hint = None
         with requests.post(
             url, json=payload, headers=headers, stream=True,
@@ -1515,78 +1602,34 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                 if not emitted_any and is_retryable_status(r.status_code):
                     retry_after_hint = r.headers.get("Retry-After")
                     return False
-                _dump_request(model["upstream_id"], body_original, payload, preview)
+                _dump_request(upstream_id, body_original, payload, preview)
                 emitted_any = True
                 handler.wfile.write(emit_content_delta(0, f"[dcc-proxy] responses {format_upstream_error(r.status_code, preview)}"))
                 handler.wfile.flush()
                 return True
+            _emit_switch_notice_once()
             r.encoding = "utf-8"
-            for raw_line in r.iter_lines(decode_unicode=True, chunk_size=1):
-                if not raw_line or not raw_line.strip():
-                    continue
-                _tl("gw_chunk", req_id=req_id, protocol="responses", line=raw_line)
-                line = raw_line.strip()
-                if line.startswith("data:"):
-                    line = line[5:].strip()
-                if line == "[DONE]":
-                    break
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                event_type = event.get("type")
-                if event_type == "response.output_text.delta" and event.get("delta"):
-                    emitted_any = True
-                    handler.wfile.write(emit_content_delta(0, event["delta"]))
-                    handler.wfile.flush()
-                elif event_type == "response.output_item.added":
-                    item = event.get("item") or {}
-                    if item.get("type") == "function_call":
-                        close_text_block()
-                        item_id = item.get("id", "")
-                        call_id = item.get("call_id") or item_id
-                        block_idx = next_block_idx
-                        next_block_idx += 1
-                        tool_states[item_id] = {
-                            "block_idx": block_idx,
-                            "call_id": call_id,
-                            "name": item.get("name", ""),
-                        }
-                        emitted_any = True
-                        handler.wfile.write(emit_tool_use_start(block_idx, call_id, item.get("name", "")))
-                        handler.wfile.flush()
-                elif event_type == "response.function_call_arguments.delta":
-                    item_id = event.get("item_id", "")
-                    state = tool_states.get(item_id)
-                    if state and event.get("delta"):
-                        emitted_any = True
-                        handler.wfile.write(emit_tool_input_delta(state["block_idx"], event["delta"]))
-                        handler.wfile.flush()
-                elif event_type == "response.completed":
-                    usage = event.get("response", {}).get("usage") or {}
-                    output_tokens = usage.get("output_tokens", 0)
-                    input_tokens = usage.get("input_tokens", 0)
-                    if tool_states:
-                        stop_reason = "tool_use"
-                    _log(f"[responses] usage: input_tokens={input_tokens} output_tokens={output_tokens} tools={len(tool_states)}")
+            _consume_responses_stream(r.iter_lines(decode_unicode=True, chunk_size=1))
         return True
 
-    attempts = 0
-    retry_attempts = 0
-    try:
+    def _run_tail_with_retry(upstream_id, url, headers, payload) -> None:
+        """链尾候选的重试外层 · 完整保留改造前 responses 的 while-True 重试/保护关闭语义。"""
+        nonlocal emitted_any
+        attempts = 0
+        retry_attempts = 0
         while True:
             attempts += 1
             try:
-                ok = _run_upstream()
+                ok = _run_tail_upstream(upstream_id, url, headers, payload)
                 if ok:
-                    break
+                    return
                 if retry_attempts >= MAX_RETRIES:
                     _log(f"[ERROR] responses retryable status 超过 {MAX_RETRIES} 次 · 放弃 · last={last_error_status} body={last_error_body[:500]}")
                     emitted_any = True
                     msg = f"[dcc-proxy] responses {format_upstream_error(last_error_status, last_error_body, retries=retry_attempts)}"
                     handler.wfile.write(emit_content_delta(0, msg))
                     handler.wfile.flush()
-                    break
+                    return
                 retry_attempts += 1
                 delay = compute_backoff(retry_attempts, retry_after_hint)
                 _log(f"[WARN] responses upstream retryable · attempt={retry_attempts}/{MAX_RETRIES} · sleep={delay:.1f}s · retry_after={retry_after_hint}")
@@ -1598,18 +1641,87 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                     continue
                 _log(f"[ERROR] responses stream break after emit(attempts={attempts}) · {type(e).__name__}: {e}")
                 try:
+                    emitted_any = True
                     handler.wfile.write(emit_content_delta(0, f"\n\n[dcc-proxy] upstream stream broke: {type(e).__name__}"))
                     handler.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
-                break
+                return
             except requests.RequestException as e:
                 _log(f"[ERROR] responses request failed: {e}")
                 try:
+                    emitted_any = True
                     handler.wfile.write(emit_content_delta(0, f"[dcc-proxy] upstream error: {e}"))
                     handler.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
+                return
+
+    try:
+        # ── failover 主循环:逐候选尝试 · 非链尾走软超时守卫 · 链尾走原样 retry ──
+        # 首帧一旦到达(emitted_any)即锁定当前候选,循环终止,绝不再切(硬约束)。
+        for i, cand in enumerate(chain):
+            candidate_attempts += 1
+            cu, cu_url, cu_headers, cu_payload = _build_responses_req(cand)
+            is_tail = (i == len(chain) - 1)
+            if not is_tail and CONFIG.max_candidates > 1:
+                # 非链尾:守卫连接 · 首字节超时/首帧前 429/5xx/连断 → 切下一候选
+                _log(f"→ responses {cu} · guarded(soft={soft_timeout:.0f}s) · cand={i+1}/{len(chain)} · url={cu_url} · input={len(input_messages)}")
+                _tl("gw_req", req_id=req_id, protocol="responses", url=cu_url, upstream_id=cu, payload=cu_payload, candidate=i + 1)
+                try:
+                    conn = _guarded_connect(
+                        cu_url, cu_payload, cu_headers, soft_timeout=soft_timeout,
+                        decode_unicode=True, req_id=req_id, protocol="responses",
+                    )
+                except _SoftTimeout:
+                    _log(f"[WARN] responses {cu} 首字节 {soft_timeout:.0f}s 未响应 · 切下一候选")
+                    _tl("failover", req_id=req_id, protocol="responses", reason="soft_timeout", from_id=cu, soft_timeout=soft_timeout)
+                    continue
+                except _Upstream429 as e:
+                    _log(f"[WARN] responses {cu} 首帧前 upstream {e.status} · switch_on_429={CONFIG.switch_on_429} · 切下一候选")
+                    _tl("failover", req_id=req_id, protocol="responses", reason=f"upstream_{e.status}", from_id=cu)
+                    continue
+                except _STREAM_RETRY_EXC as e:
+                    _log(f"[WARN] responses {cu} 首帧前连接异常 · {type(e).__name__}: {e} · 切下一候选")
+                    _tl("failover", req_id=req_id, protocol="responses", reason=type(e).__name__, from_id=cu)
+                    continue
+                except requests.RequestException as e:
+                    _log(f"[WARN] responses {cu} 连接失败 · {type(e).__name__}: {e} · 切下一候选")
+                    _tl("failover", req_id=req_id, protocol="responses", reason=type(e).__name__, from_id=cu)
+                    continue
+                # 守卫成功 · 首字节已到 · 锁定本候选 · 若非主模型则备好切换提示
+                if i > 0:
+                    failover_to = cu
+                    switch_notice["text"] = (
+                        f"[dcc] 主模型 {primary_id} 首字节 {soft_timeout:.0f}s 未响应 · 已切至 {cu}\n\n"
+                    )
+                    _log(f"[INFO] responses failover {primary_id} → {cu}(cand {i+1}/{len(chain)})")
+                    _tl("failover_locked", req_id=req_id, protocol="responses", from_id=primary_id, to_id=cu, candidate=i + 1)
+                with conn.response:
+                    try:
+                        _consume_responses_stream(conn.iter_all())
+                    except _STREAM_RETRY_EXC as e:
+                        # 首帧后流断 → 保护关闭(不切;硬约束)· 首帧前(空响应)也在此收尾
+                        _log(f"[ERROR] responses stream break(guarded {cu}) · {type(e).__name__}: {e}")
+                        try:
+                            emitted_any = True
+                            handler.wfile.write(emit_content_delta(0, f"\n\n[dcc-proxy] upstream stream broke: {type(e).__name__}"))
+                            handler.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            pass
+                break
+            else:
+                # 链尾(或唯一 · 或 max_candidates<=1):原样自 post + retry(零回归)
+                if i > 0:
+                    failover_to = cu
+                    switch_notice["text"] = (
+                        f"[dcc] 主模型 {primary_id} 首字节 {soft_timeout:.0f}s 未响应 · 已切至 {cu}\n\n"
+                    )
+                    _log(f"[INFO] responses failover {primary_id} → {cu}(链尾候选 {i+1}/{len(chain)})")
+                    _tl("failover_locked", req_id=req_id, protocol="responses", from_id=primary_id, to_id=cu, candidate=i + 1)
+                _log(f"→ responses {cu} · url={cu_url} · input={len(input_messages)}")
+                _tl("gw_req", req_id=req_id, protocol="responses", url=cu_url, upstream_id=cu, payload=cu_payload, candidate=i + 1)
+                _run_tail_with_retry(cu, cu_url, cu_headers, cu_payload)
                 break
     finally:
         if not text_block_stopped:
@@ -1623,6 +1735,7 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
             "done", req_id=req_id, protocol="responses",
             stop_reason=stop_reason, input_tokens=input_tokens, output_tokens=output_tokens,
             tools_emitted=len(tool_states), emitted_any=emitted_any, dt=round(time.time() - t0, 3),
+            failover_to=failover_to, candidate_attempts=candidate_attempts,
         )
 
 
@@ -1757,7 +1870,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
             try:
                 if m["protocol"] == "responses":
-                    stream_responses_to_anthropic(self, model_name, m, messages, extra, body)
+                    stream_responses_to_anthropic(self, model_name, m, messages, extra, body, openai_chain)
                 elif m["protocol"] == "anthropic":
                     stream_anthropic_to_anthropic(self, model_name, m, body)
                 else:
@@ -1780,7 +1893,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.wfile = buf  # 三个 stream_* 只碰 handler.wfile · 无侵入替换
         try:
             if m["protocol"] == "responses":
-                stream_responses_to_anthropic(self, model_name, m, messages, extra, body)
+                stream_responses_to_anthropic(self, model_name, m, messages, extra, body, openai_chain)
             elif m["protocol"] == "anthropic":
                 stream_anthropic_to_anthropic(self, model_name, m, body)
             else:
