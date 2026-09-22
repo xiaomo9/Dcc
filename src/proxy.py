@@ -195,6 +195,7 @@ def render_config_yaml(cfg: DccConfig) -> None:
     """
     data = {
         "port": cfg.port,
+        "telemetry": cfg.telemetry,
         "retention_days": cfg.retention_days,
         "failover": {
             "soft_timeout": cfg.failover.soft_timeout,

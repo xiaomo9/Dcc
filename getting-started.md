@@ -1,6 +1,8 @@
 # dcc 上手指南（0→1）
 
 > **本指南面向"照着做就能配好"的读者——人或 AI 均可。**
+> **建议直接让AI读取这个文件并执行相应操作，跟着做就可以。 **
+
 > 每一步都给出可直接执行的命令、明确的**成功判据**、以及失败时的下一步。
 > 若你是 AI 助手:请按顺序执行,每步用其成功判据自检通过后再进入下一步;遇到判据不满足,走该步的「排错」而不是硬闯下一步。
 >
@@ -10,7 +12,7 @@
 
 ## 0. 这是什么 / 为什么需要
 
-`claude` CLI（Claude Code）默认只连 Anthropic 官方服务器，京东网络连不通。
+`claude` CLI（Claude Code） 支持不同终端使用不同的模型。
 
 **dcc = 跑在本地 `127.0.0.1:4000` 的轻代理**，干一件事：**协议转换**。
 它把 Claude Code 发出的 Anthropic 格式请求，翻译成京东内网各网关认识的格式（openai / responses / anthropic），转发过去，再把回复翻译回来。
@@ -38,7 +40,7 @@ python3.11 -m pip install requests
 #    llm-gw 的 key 服务 slot 1-4;rag 的 key 服务 slot 5-8
 $EDITOR ~/.dm/llm.ini
 # 3) 装 alias(路径换成你的仓库位置)
-echo "alias dcc='bash /你的路径/tools/dcc/dcc.sh'" >> ~/.zshrc && source ~/.zshrc
+echo "alias dcc='bash /你的路径/dcc/dcc.sh'" >> ~/.zshrc && source ~/.zshrc
 # 4) 自检:见 §5
 dcc list
 dcc 1 "只回复一个词:pong" --dangerously-skip-permissions
@@ -90,7 +92,7 @@ curl -sS -m 5 -o /dev/null -w '%{http_code}\n' http://rag.jd.care/v1/models
 ---
 
 ## 3. 填 `~/.dm/llm.ini`（模型三要素单点权威）
-
+提醒用户去填写这个文件并提示用户配置与dcc.ini同步！！
 这是**唯一**存放模型连接信息的地方。dcc 从这里读每个模型的 `base_url / api_key / model / protocol`。
 
 > 全新环境才需从零创建：`mkdir -p ~/.dm && $EDITOR ~/.dm/llm.ini`。
@@ -123,13 +125,12 @@ protocol = openai                          # openai / responses / anthropic 三�
 | 2 | `GPT-5.6-Luna-joybuilder` | GPT-5.6-Luna-joybuilder | responses | llm-gw | ✅ |
 | 3 | `GPT-5.6-Terra-joybuilder` | GPT-5.6-Terra-joybuilder | responses | llm-gw | ✅ |
 | 4 | `GPT-5.6-Sol-joybuilder` | GPT-5.6-Sol-joybuilder | responses | llm-gw | ✅ |
-| 5 | `rag-claude-opus-4-5` | claude-opus-4-5 | openai | rag `/v1` | ⚠️ **网关兜底成 GLM-5**，非真 Opus 4.5（id 网关不认时的静默兜底） |
+| 5 | `rag-claude-opus-4-5` | claude-opus-4-5 | openai | rag `/v1` | ✅ 真 
 | 6 | `rag-claude-opus-4-6` | claude-opus-4-6 | openai | rag `/v1` | ✅ 真 Claude-Opus-4.6（~2.6s） |
 | 7 | `rag-claude-opus-4-7` | claude-opus-4-7 | openai | rag `/v1` | ✅ 真 Claude-Opus-4.7（~1.9s） |
 | 8 | `rag-claude-opus-4-8` | claude-opus-4-8 | openai | rag `/v1` | ✅ 真 Claude-Opus-4.8（~2.5s） |
 
 > **本表随配置变动，以 `dcc list` + `config.json` 为准**——文档表格可能滞后。
-> **slot 5 提醒**：配的 id 是 `claude-opus-4-5`，但 rag 网关实测返回 `"model":"GLM-5"`，说明网关不认该 id、静默兜底到 GLM-5。要用真 Opus，改用平台认得的 id（如 6/7/8）或让 owner 确认 4.5 的正确 id。
 > **rag `/anthropic` 端点走不通**：曾用 `base_url=…/anthropic` + `protocol=anthropic`，带 key 实发 55s 挂死、0 字节。现 rag 系统一走 `/v1` + openai。
 
 ---
@@ -139,7 +140,7 @@ protocol = openai                          # openai / responses / anthropic 三�
 `dcc.sh` 是入口脚本。加个 alias 到 shell 配置：
 
 ```bash
-echo "alias dcc='bash /你的仓库路径/tools/dcc/dcc.sh'" >> ~/.zshrc
+echo "alias dcc='bash /你的仓库路径/dcc/dcc.sh'" >> ~/.zshrc
 source ~/.zshrc
 dcc -v
 ```

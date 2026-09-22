@@ -11,6 +11,7 @@ from . import proxy as P
 from . import cc as CC
 from .config import DccConfig, ModelSlot, load as load_config
 from .version import DCC_VERSION
+from .telemetry import Telemetry
 
 
 HELP = f"""dcc v{DCC_VERSION} — 本地 CC 多模型代理管理器
@@ -122,7 +123,18 @@ def _cmd_stop(cfg: DccConfig, t0: float) -> int:
 def _cmd_start_slot(
     cfg: DccConfig, slot: ModelSlot, resume: str, extra: list[str], t0: float
 ) -> int:
-    P.start(cfg)
+    usage = Telemetry(cfg.output_dir / "telemetry", cfg.telemetry, DCC_VERSION)
+    usage.track("dcc_launch", slot=slot.slot, protocol=slot.protocol,
+                mode="resume" if resume is not None else ("prompt" if "-p" in extra else "interactive"))
+    started = time.monotonic()
+    try:
+        P.start(cfg)
+    except (Exception, SystemExit):
+        usage.track("dcc_proxy_start", result="failed",
+                    durationMs=round((time.monotonic() - started) * 1000))
+        raise
+    usage.track("dcc_proxy_start", result="ready",
+                durationMs=round((time.monotonic() - started) * 1000))
     L.done(t0, ok=True, slot=slot.slot, model=slot.local_name, resume=resume or "-")
     # 之后 exec 替换进程,不再返回
     CC.spawn(cfg, slot, resume, extra)

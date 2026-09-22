@@ -48,6 +48,7 @@ import requests
 import urllib3
 
 from traffic_log import ExecLog, TrafficLog
+from telemetry import Telemetry, RequestMetrics
 from retry_policy import compute_backoff, format_upstream_error, is_retryable_status, MAX_RETRIES
 
 
@@ -252,6 +253,14 @@ class Config:
 
 
 CONFIG: Config
+USAGE: Telemetry | None = None
+_USAGE_LOCAL = threading.local()
+
+def _usage_error(reason: str) -> None:
+    metrics = getattr(_USAGE_LOCAL, "metrics", None)
+    if metrics is not None:
+        metrics.error = reason
+
 
 
 def _log(msg: str) -> None:
@@ -265,6 +274,13 @@ def _tl(kind: str, **fields) -> None:
     """内部转发到全局 TrafficLog · 未初始化时短路,不影响主链路。"""
     if TL is not None:
         TL.log(kind, **fields)
+    metrics = getattr(_USAGE_LOCAL, "metrics", None)
+    if metrics is not None:
+        try:
+            metrics.observe(kind, fields)
+        except Exception:
+            pass
+
 
 
 def _strip_think_stream(chunk: str, state: dict) -> str:
@@ -1334,22 +1350,26 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
                     continue
                 # 首帧已 emit → 保护关闭 · 让 CC 端能干净结尾
                 _log(f"[ERROR] openai stream break after emit(attempts={attempts}) · {type(e).__name__}: {e}")
+                _usage_error("upstream_connection_error")
                 try:
                     emitted_any = True
                     _ensure_text_started()
                     handler.wfile.write(emit_content_delta(0, f"\n\n[dcc-proxy] upstream stream broke: {type(e).__name__}"))
                     handler.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
+                    _usage_error("client_disconnected")
                     pass
                 return
             except requests.RequestException as e:
                 _log(f"[ERROR] openai request failed: {e}")
+                _usage_error("upstream_connection_error")
                 try:
                     emitted_any = True
                     _ensure_text_started()
                     handler.wfile.write(emit_content_delta(0, f"[dcc-proxy] upstream error: {e}"))
                     handler.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
+                    _usage_error("client_disconnected")
                     pass
                 return
 
@@ -1398,12 +1418,14 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
                 except _STREAM_RETRY_EXC as e:
                     # 首帧后流断 → 保护关闭(不切;硬约束)· 首帧前(空响应)也在此收尾
                     _log(f"[ERROR] openai stream break(guarded {cu}) · {type(e).__name__}: {e}")
+                    _usage_error("upstream_connection_error")
                     try:
                         emitted_any = True
                         _ensure_text_started()
                         handler.wfile.write(emit_content_delta(0, f"\n\n[dcc-proxy] upstream stream broke: {type(e).__name__}"))
                         handler.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
+                        _usage_error("client_disconnected")
                         pass
             break
         else:
@@ -1640,20 +1662,24 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                     _log(f"[WARN] responses stream break before first byte · {type(e).__name__}: {e} · retry {attempts}/{STREAM_MAX_RETRIES}")
                     continue
                 _log(f"[ERROR] responses stream break after emit(attempts={attempts}) · {type(e).__name__}: {e}")
+                _usage_error("upstream_connection_error")
                 try:
                     emitted_any = True
                     handler.wfile.write(emit_content_delta(0, f"\n\n[dcc-proxy] upstream stream broke: {type(e).__name__}"))
                     handler.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
+                    _usage_error("client_disconnected")
                     pass
                 return
             except requests.RequestException as e:
                 _log(f"[ERROR] responses request failed: {e}")
+                _usage_error("upstream_connection_error")
                 try:
                     emitted_any = True
                     handler.wfile.write(emit_content_delta(0, f"[dcc-proxy] upstream error: {e}"))
                     handler.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
+                    _usage_error("client_disconnected")
                     pass
                 return
 
@@ -1703,11 +1729,13 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                     except _STREAM_RETRY_EXC as e:
                         # 首帧后流断 → 保护关闭(不切;硬约束)· 首帧前(空响应)也在此收尾
                         _log(f"[ERROR] responses stream break(guarded {cu}) · {type(e).__name__}: {e}")
+                        _usage_error("upstream_connection_error")
                         try:
                             emitted_any = True
                             handler.wfile.write(emit_content_delta(0, f"\n\n[dcc-proxy] upstream stream broke: {type(e).__name__}"))
                             handler.wfile.flush()
                         except (BrokenPipeError, ConnectionResetError):
+                            _usage_error("client_disconnected")
                             pass
                 break
             else:
@@ -1780,6 +1808,25 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._send_json(404, {"error": f"unknown path {self.path}"})
 
     def do_POST(self) -> None:  # noqa
+        metrics = RequestMetrics(USAGE) if USAGE is not None and USAGE.enabled else None
+        _USAGE_LOCAL.metrics = metrics
+        try:
+            self._do_POST()
+        except (BrokenPipeError, ConnectionResetError):
+            _usage_error("client_disconnected")
+            raise
+        except Exception:
+            _usage_error("proxy_error")
+            raise
+        finally:
+            if metrics is not None:
+                try:
+                    metrics.finish()
+                except Exception:
+                    pass
+            _USAGE_LOCAL.metrics = None
+
+    def _do_POST(self) -> None:
         path = self._path_only()
         if path == "/v1/messages/count_tokens":
             self._handle_count_tokens()
@@ -1805,6 +1852,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             client=f"{self.client_address[0]}:{self.client_address[1]}",
             model=model_name,
             resolved=(m or {}).get("name"),
+            slot=(m or {}).get("slot"),
             protocol=(m or {}).get("protocol"),
             upstream_id=(m or {}).get("upstream_id"),
             stream=bool(body.get("stream", False)),
@@ -1876,13 +1924,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     stream_openai_to_anthropic(self, model_name, m, messages, extra, body, openai_chain)
             except (BrokenPipeError, ConnectionResetError):
+                _usage_error("client_disconnected")
                 _log("client disconnected mid-stream")
             except Exception as e:
                 _log(f"ERROR: {e}\n{traceback.format_exc()}")
+                _usage_error("proxy_error")
                 try:
                     self.wfile.write(emit_error(str(e)))
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
+                    _usage_error("client_disconnected")
                     pass
             return
 
@@ -1919,6 +1970,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(raw)
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
+            _usage_error("client_disconnected")
             _log("client disconnected before non-stream response written")
 
     def _send_json(self, code: int, payload: dict) -> None:
@@ -2100,18 +2152,22 @@ def stream_anthropic_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                 _log(f"[WARN] anthropic stream break before first byte · {type(e).__name__}: {e} · retry {attempts}/{STREAM_MAX_RETRIES}")
                 continue
             _log(f"[ERROR] anthropic stream break after emit(attempts={attempts}) · {type(e).__name__}: {e}")
+            _usage_error("upstream_connection_error")
             try:
                 handler.wfile.write(emit_error(f"[dcc-proxy] anthropic stream broke: {type(e).__name__}"))
                 handler.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
+                _usage_error("client_disconnected")
                 pass
             break
         except requests.RequestException as e:
             _log(f"[ERROR] anthropic gateway connect failed: {e}")
+            _usage_error("upstream_connection_error")
             try:
                 handler.wfile.write(emit_error(f"[dcc-proxy] anthropic gateway connect: {e}"))
                 handler.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
+                _usage_error("client_disconnected")
                 pass
             break
 
@@ -2158,7 +2214,7 @@ def main() -> None:
     if not cfg_path.exists():
         print(f"config not found: {cfg_path}", file=sys.stderr)
         sys.exit(2)
-    global CONFIG, DUMP_DIR, TL, EL
+    global CONFIG, DUMP_DIR, TL, EL, USAGE
     CONFIG = Config(json.loads(cfg_path.read_text(encoding="utf-8")))
     DUMP_DIR = cfg_path.parent / "dumps"
     log_dir = cfg_path.parent / "log"
@@ -2174,6 +2230,8 @@ def main() -> None:
     # dumps/ 是 400 请求 body 落盘 · 命名 req_YYYYMMDD_HHMMSS_*.json
     _cleanup_dumps_old(DUMP_DIR, retention_days)
     server = ThreadingHTTPServer(("0.0.0.0", CONFIG.port), ProxyHandler)
+    USAGE = Telemetry(cfg_path.parent / "telemetry", _cfg_data.get("telemetry", {}), DCC_VERSION)
+    USAGE.start()
     _log(f"========== dcc-proxy version={DCC_VERSION} ==========")
     _log(f"dcc-proxy listening on 0.0.0.0:{CONFIG.port} · models={list(CONFIG.models_by_name)}")
     _log(f"dump dir = {DUMP_DIR}(遇 400 时落盘请求 body,滚动保留 {DUMP_KEEP} 份)")
@@ -2183,6 +2241,7 @@ def main() -> None:
     except KeyboardInterrupt:
         _log("KeyboardInterrupt, shutting down")
     finally:
+        USAGE.close()
         server.server_close()
 
 

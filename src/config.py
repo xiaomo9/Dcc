@@ -46,6 +46,7 @@ class DccConfig:
     retention_days: int = 3
     slots: dict[str, ModelSlot] = field(default_factory=dict)
     failover: FailoverConfig = field(default_factory=FailoverConfig)
+    telemetry: dict = field(default_factory=dict)
 
 
 def load(ini_path: Path | None = None) -> DccConfig:
@@ -124,6 +125,10 @@ def load(ini_path: Path | None = None) -> DccConfig:
         retention_days=p.getint("proxy", "retention_days", fallback=3),
         slots=slots,
         failover=failover,
+        telemetry={
+            "enabled": _parse_bool(p.get("telemetry", "enabled", fallback="false")),
+            "endpoint": p.get("telemetry", "endpoint", fallback="").strip(),
+        },
     )
 
 
