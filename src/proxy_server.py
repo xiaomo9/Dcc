@@ -1119,8 +1119,16 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
             text_block_started = True
 
     def _close_text_if_open():
-        nonlocal text_block_stopped
-        if text_block_started and not text_block_stopped:
+        nonlocal text_block_stopped, emitted_any
+        if text_block_stopped:
+            return
+        # 切到工具调用前先输出尾文，避免向已关闭的 text block 补发 delta。
+        if think_state["buf"] and think_state.get("mode") == "tag" and not think_state["in_think"]:
+            emitted_any = True
+            _ensure_text_started()
+            handler.wfile.write(emit_content_delta(0, think_state["buf"]))
+            think_state["buf"] = ""
+        if text_block_started:
             handler.wfile.write(emit_content_block_stop(0))
             handler.wfile.flush()
             text_block_stopped = True
@@ -1441,12 +1449,6 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
             _tl("gw_req", req_id=req_id, protocol="openai", url=cu_url, upstream_id=cu, payload=cu_payload, candidate=i + 1)
             _run_tail_with_retry(cu, cu_url, cu_headers, cu_payload)
             break
-
-    # stream 结束 · flush think 过滤器 buf 里剩余
-    if think_state["buf"] and think_state.get("mode") == "tag" and not think_state["in_think"]:
-        _ensure_text_started()
-        handler.wfile.write(emit_content_delta(0, think_state["buf"]))
-        handler.wfile.flush()
 
     # 关掉 thinking 块(如未关)· 关掉 text 块(如未关)· 关掉所有 tool_use 块
     _close_thinking_if_open()
