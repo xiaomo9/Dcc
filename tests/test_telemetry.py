@@ -206,6 +206,17 @@ class TelemetryTests(unittest.TestCase):
                                     json={'model': 'mock', 'stream': stream, 'max_tokens': 10,
                                           'messages': [{'role': 'user', 'content': 'PRIVATE'}]}, timeout=5)
                             response.close()
+                            if outcome != 'success':
+                                if stream:
+                                    events_out = list(proxy._parse_sse_events(response.content))
+                                    self.assertEqual(sum(name == 'error' for name, _ in events_out), 1)
+                                    self.assertNotIn('message_stop', [name for name, _ in events_out])
+                                    self.assertNotIn('[dcc-proxy]', ''.join(
+                                        event.get('delta', {}).get('text', '') for _, event in events_out))
+                                else:
+                                    self.assertEqual(response.status_code, 429 if outcome == 'http_error' else 502)
+                                    self.assertEqual(response.json()['type'], 'error')
+                                    self.assertNotIn('content', response.json())
                             # Content-Length permits the client to finish before handler finally runs.
                             deadline = time.monotonic() + 2
                             events = self.events()

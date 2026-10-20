@@ -252,9 +252,13 @@ max_candidates = 3     # 单请求最多尝试候选数(含主模型),防雪崩;
 | `dcc stop` | 停全部 CC + 杀代理 + 重启代理（**改完任何配置后必做**） |
 | `dcc -v` / `dcc -h` | 版本 / 帮助 |
 
+同一槽位可在多个终端同时运行，`dcc status` 按 PID 列出全部已登记的存活实例。`dcc stop` 仍会停止全部登记实例并重启代理；停止信号发送失败的记录保留。旧实例文件会自动转为 PID 键格式，但此前被旧版覆盖丢失的记录无法恢复；更新后请统一使用新版启动终端。
+
 ---
 
 ## 8. 排错
+
+OpenAI、Responses、Anthropic 的上游失败现统一返回明确错误：流式通过 SSE `error` 结束，非流式返回错误 JSON 和非 2xx 状态，不再把错误当作普通 assistant 回答。已有输出不重放，原有重试与切换策略不变。真实 Claude Code 如何展示错误、是否继续自行重试，尚未实测。
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
@@ -263,7 +267,8 @@ max_candidates = 3     # 单请求最多尝试候选数(含主模型),防雪崩;
 | 日志 `[WARN] 未知 model=xxx · 兜底路由到 default=…` | 代理内存模型表无此名（多半改了 section 名没重启） | 先 `dcc stop`；再核对 dcc.ini 与 llm.ini section 名 |
 | 回复的模型名不对（如配 Claude 实际回 GLM-5） | 网关不认该 model id，**静默兜底**到别的模型 | 核对 llm.ini 的 `model` 行填的是网关认得的真实 id |
 | rag 槽位卡住不返回 | ① 用了 `/anthropic` 端点（带 key 实发 55s 挂死）② rag 本身首字节慢 | ① 改成 `/v1` + `protocol=openai`；② 调大 `DCC_STREAM_IDLE_TIMEOUT` |
-| `openai upstream retried 3 times · 放弃`，该轮无输出 | 网关侧 429 限流（配额/突发） | 换槽位重试；组B（rag 系）会自动切候选。详见 `known-issues.md` KI-01 |
+| 返回上游 429 错误，重试后仍失败 | 网关侧限流（配额/突发） | 检查配额或稍后重试，也可手动换槽位；详见 [KI-01 最新状态](docs/known-issues.md) |
+| 非流式返回 502 / 504 | 无上游错误状态时，502 表示连接失败、流截断或流内错误，504 表示超时；上游直接返回的 HTTP 错误也会保留状态码 | 结合代理日志判断原因；不要把已有部分输出当作完整结果 |
 | 找不到 `claude` | 不在 PATH | `dcc.ini [cc] binary =` 写死绝对路径 |
 
 **可调环境变量**（起 dcc 前 export，无需改代码）：

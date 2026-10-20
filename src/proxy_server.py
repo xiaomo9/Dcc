@@ -71,7 +71,7 @@ TL: TrafficLog | None = None
 EL: ExecLog | None = None
 
 # 流式中断保护 · DeepSeek-V4/Qwen 推理链路长上下文下网关偶发 ChunkedEncoding 断流
-# · 首帧到达前允许重试(重放安全)· 首帧后合法闭合已开块并向 CC 端 emit error,防"响应中断"
+# · 首帧到达前允许重试(重放安全)· 首帧后返回 error,不再生成成功结束事件
 STREAM_MAX_RETRIES = int(os.environ.get("DCC_STREAM_RETRIES", "1"))
 # 上游连接超时 / socket 静默(两字节之间)超时 · requests.timeout=(connect, read) 的 read 即静默
 # 单请求总时长仍受 requests + 上游共同约束
@@ -130,6 +130,32 @@ class _Upstream429(Exception):
         self.status = status
         self.body_preview = body_preview
         self.retry_after = retry_after
+
+
+class UpstreamFailure(Exception):
+    """终止本次请求；由 HTTP 出口选择 SSE error 或错误 JSON。"""
+
+    def __init__(self, message: str, status: int = 502, error_type: str = "api_error"):
+        super().__init__(message)
+        self.status = status
+        self.payload = {"type": "error", "error": {"type": error_type, "message": message}}
+
+
+def _connection_failure(exc: BaseException) -> UpstreamFailure:
+    # requests 在迭代响应体时可能将 ReadTimeoutError 包装为 ConnectionError。
+    pending = [exc]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (requests.exceptions.Timeout, urllib3.exceptions.TimeoutError)):
+            return UpstreamFailure(f"upstream timeout: {exc}", 504)
+        pending.extend(arg for arg in current.args if isinstance(arg, BaseException))
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return UpstreamFailure(f"upstream connection failed: {exc}")
 
 
 class _GuardedConn:
@@ -951,7 +977,7 @@ def collect_sse_to_message(raw: bytes, fallback_model: str, fallback_msg_id: str
     - content_block_delta 累加 text_delta / thinking_delta / input_json_delta(partial_json)
     - message_delta 覆盖 stop_reason/stop_sequence · usage.output_tokens 追加
     - tool_use.input 从 partial_json 拼接后 JSON.parse · 拼不出则回退 {}
-    - 缺 message_start 时用 fallback_* 兜底(error 事件也走这里)
+    - error 事件终止聚合,由 HTTP 出口返回错误
     """
     message: dict = {
         "id": fallback_msg_id,
@@ -965,7 +991,6 @@ def collect_sse_to_message(raw: bytes, fallback_model: str, fallback_msg_id: str
     }
     blocks_by_idx: dict[int, dict] = {}
     tool_partial_json: dict[int, list[str]] = {}
-    error_msg: str | None = None
 
     for ev_name, data in _parse_sse_events(raw):
         if ev_name == "message_start":
@@ -1026,7 +1051,8 @@ def collect_sse_to_message(raw: bytes, fallback_model: str, fallback_msg_id: str
                 message["usage"]["input_tokens"] = int(usage.get("input_tokens") or 0)
         elif ev_name == "error":
             err = data.get("error") or {}
-            error_msg = err.get("message") or "upstream error"
+            raise UpstreamFailure(err.get("message") or "upstream error",
+                                  error_type=err.get("type") or "api_error")
 
     # 按 index 顺序输出 content(丢空 text 块 · 但保留空 tool_use / thinking)
     for idx in sorted(blocks_by_idx.keys()):
@@ -1034,10 +1060,6 @@ def collect_sse_to_message(raw: bytes, fallback_model: str, fallback_msg_id: str
         if b.get("type") == "text" and not (b.get("text") or "").strip():
             continue
         message["content"].append(b)
-
-    if error_msg and not message["content"]:
-        message["content"].append({"type": "text", "text": f"[dcc-proxy] {error_msg}"})
-        message["stop_reason"] = message["stop_reason"] or "end_turn"
 
     if message["stop_reason"] is None:
         message["stop_reason"] = "end_turn"
@@ -1185,6 +1207,7 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
         """
         nonlocal next_block_idx, stop_reason, output_tokens, input_tokens, emitted_any
         last_chunk: dict | None = None
+        completed = False
         for line in line_iter:
             if not line:
                 continue
@@ -1198,6 +1221,8 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
                 chunk = json.loads(data)
             except json.JSONDecodeError:
                 continue
+            if chunk.get("error"):
+                raise UpstreamFailure(str(chunk["error"]))
             last_chunk = chunk
             choices = chunk.get("choices", [])
             if not choices:
@@ -1281,6 +1306,8 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
                         handler.wfile.write(emit_tool_input_delta(st["block_idx"], args_part))
                         handler.wfile.flush()
             fr = choices[0].get("finish_reason")
+            if fr is not None:
+                completed = True
             if fr in ("stop", "length", "tool_calls"):
                 if fr == "length":
                     stop_reason = "max_tokens"
@@ -1288,6 +1315,8 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
                     stop_reason = "tool_use"
                 else:
                     stop_reason = "end_turn"
+        if not completed:
+            raise UpstreamFailure("upstream stream ended before completion")
         if last_chunk and last_chunk.get("usage"):
             output_tokens = last_chunk["usage"].get("completion_tokens", 0)
             input_tokens = last_chunk["usage"].get("prompt_tokens", 0)
@@ -1296,7 +1325,7 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
     def _run_tail_upstream(upstream_id, url, headers, payload) -> bool:
         """链尾(或唯一)候选:今日原样自 post + 状态检查 + 读循环。
 
-        返回 True=读完/已 emit 错误 · False=首帧前可重试错误(交外层 retry) · 抛异常=流断。
+        返回 True=正常读完 · False=首帧前可重试错误(交外层 retry) · 终止错误抛异常。
         无候选时 chain=[主],走此路 → 逐字节等价改造前,零回归。
         """
         nonlocal emitted_any, retry_after_hint, last_error_status, last_error_body
@@ -1317,11 +1346,7 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
                 dump_path = _dump_request(upstream_id, body_original, payload, body_preview)
                 if dump_path:
                     _log(f"[ERROR] 请求 body 已落盘: {dump_path}")
-                emitted_any = True
-                _ensure_text_started()
-                handler.wfile.write(emit_content_delta(0, f"[dcc-proxy] openai {format_upstream_error(r.status_code, body_preview)}"))
-                handler.wfile.flush()
-                return True  # non-retryable 4xx / 已 emit · 不重试
+                raise UpstreamFailure(format_upstream_error(r.status_code, body_preview), r.status_code)
             _emit_switch_notice_once()
             r.encoding = "utf-8"
             _consume_stream(r.iter_lines(decode_unicode=True, chunk_size=1))
@@ -1341,12 +1366,10 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
                 # _run_tail_upstream 返 False:上游 retryable status(429/5xx)· 首帧前
                 if retry_attempts >= MAX_RETRIES:
                     _log(f"[ERROR] openai retryable status 超过 {MAX_RETRIES} 次 · 放弃 · last={last_error_status} body={last_error_body[:500]}")
-                    emitted_any = True
-                    _ensure_text_started()
-                    msg = f"[dcc-proxy] openai {format_upstream_error(last_error_status, last_error_body, retries=retry_attempts)}"
-                    handler.wfile.write(emit_content_delta(0, msg))
-                    handler.wfile.flush()
-                    return
+                    raise UpstreamFailure(
+                        format_upstream_error(last_error_status, last_error_body, retries=retry_attempts),
+                        last_error_status,
+                    )
                 retry_attempts += 1
                 delay = compute_backoff(retry_attempts, retry_after_hint)
                 _log(f"[WARN] openai upstream retryable · attempt={retry_attempts}/{MAX_RETRIES} · sleep={delay:.1f}s · retry_after={retry_after_hint}")
@@ -1356,30 +1379,14 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
                 if not emitted_any and attempts <= STREAM_MAX_RETRIES:
                     _log(f"[WARN] openai stream break before first byte · {type(e).__name__}: {e} · retry {attempts}/{STREAM_MAX_RETRIES}")
                     continue
-                # 首帧已 emit → 保护关闭 · 让 CC 端能干净结尾
+                # 首帧已 emit → 返回错误,禁止重放及成功结束
                 _log(f"[ERROR] openai stream break after emit(attempts={attempts}) · {type(e).__name__}: {e}")
                 _usage_error("upstream_connection_error")
-                try:
-                    emitted_any = True
-                    _ensure_text_started()
-                    handler.wfile.write(emit_content_delta(0, f"\n\n[dcc-proxy] upstream stream broke: {type(e).__name__}"))
-                    handler.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    _usage_error("client_disconnected")
-                    pass
-                return
+                raise _connection_failure(e) from e
             except requests.RequestException as e:
                 _log(f"[ERROR] openai request failed: {e}")
                 _usage_error("upstream_connection_error")
-                try:
-                    emitted_any = True
-                    _ensure_text_started()
-                    handler.wfile.write(emit_content_delta(0, f"[dcc-proxy] upstream error: {e}"))
-                    handler.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    _usage_error("client_disconnected")
-                    pass
-                return
+                raise _connection_failure(e) from e
 
     # ── failover 主循环:逐候选尝试 · 非链尾走软超时守卫 · 链尾走今日原样 retry ──
     # 首帧一旦到达(emitted_any)即锁定当前候选,循环终止,绝不再切(硬约束)。
@@ -1423,18 +1430,11 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
             with conn.response:
                 try:
                     _consume_stream(conn.iter_all())
-                except _STREAM_RETRY_EXC as e:
+                except _STREAM_RETRY_EXC + (requests.RequestException,) as e:
                     # 首帧后流断 → 保护关闭(不切;硬约束)· 首帧前(空响应)也在此收尾
                     _log(f"[ERROR] openai stream break(guarded {cu}) · {type(e).__name__}: {e}")
                     _usage_error("upstream_connection_error")
-                    try:
-                        emitted_any = True
-                        _ensure_text_started()
-                        handler.wfile.write(emit_content_delta(0, f"\n\n[dcc-proxy] upstream stream broke: {type(e).__name__}"))
-                        handler.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError):
-                        _usage_error("client_disconnected")
-                        pass
+                    raise _connection_failure(e) from e
             break
         else:
             # 链尾(或唯一 · 或 max_candidates<=1):今日原样自 post + retry(零回归)
@@ -1553,6 +1553,7 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
         切换来的候选 · 在首个可见 delta 前经 _emit_switch_notice_once 注入提示行。
         """
         nonlocal output_tokens, input_tokens, stop_reason, next_block_idx, emitted_any
+        completed = False
         for raw_line in line_iter:
             if not raw_line or not raw_line.strip():
                 continue
@@ -1567,6 +1568,8 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
             except json.JSONDecodeError:
                 continue
             event_type = event.get("type")
+            if event_type in ("error", "response.failed", "response.incomplete"):
+                raise UpstreamFailure(str(event.get("error") or event.get("response") or event_type))
             if event_type == "response.output_text.delta" and event.get("delta"):
                 _emit_switch_notice_once()
                 emitted_any = True
@@ -1597,17 +1600,20 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                     handler.wfile.write(emit_tool_input_delta(state["block_idx"], event["delta"]))
                     handler.wfile.flush()
             elif event_type == "response.completed":
+                completed = True
                 usage = event.get("response", {}).get("usage") or {}
                 output_tokens = usage.get("output_tokens", 0)
                 input_tokens = usage.get("input_tokens", 0)
                 if tool_states:
                     stop_reason = "tool_use"
                 _log(f"[responses] usage: input_tokens={input_tokens} output_tokens={output_tokens} tools={len(tool_states)}")
+        if not completed:
+            raise UpstreamFailure("upstream stream ended before completion")
 
     def _run_tail_upstream(upstream_id, url, headers, payload) -> bool:
         """链尾(或唯一)候选:原样自 post + 状态检查 + 读循环。
 
-        返回 True=读完/已 emit 错误 · False=首帧前可重试错误(交外层 retry) · 抛异常=流断。
+        返回 True=正常读完 · False=首帧前可重试错误(交外层 retry) · 终止错误抛异常。
         无候选时 chain=[主],走此路 → 逐字节等价改造前,零回归。
         """
         nonlocal emitted_any, retry_after_hint, last_error_status, last_error_body
@@ -1627,10 +1633,7 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                     retry_after_hint = r.headers.get("Retry-After")
                     return False
                 _dump_request(upstream_id, body_original, payload, preview)
-                emitted_any = True
-                handler.wfile.write(emit_content_delta(0, f"[dcc-proxy] responses {format_upstream_error(r.status_code, preview)}"))
-                handler.wfile.flush()
-                return True
+                raise UpstreamFailure(format_upstream_error(r.status_code, preview), r.status_code)
             _emit_switch_notice_once()
             r.encoding = "utf-8"
             _consume_responses_stream(r.iter_lines(decode_unicode=True, chunk_size=1))
@@ -1649,11 +1652,10 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                     return
                 if retry_attempts >= MAX_RETRIES:
                     _log(f"[ERROR] responses retryable status 超过 {MAX_RETRIES} 次 · 放弃 · last={last_error_status} body={last_error_body[:500]}")
-                    emitted_any = True
-                    msg = f"[dcc-proxy] responses {format_upstream_error(last_error_status, last_error_body, retries=retry_attempts)}"
-                    handler.wfile.write(emit_content_delta(0, msg))
-                    handler.wfile.flush()
-                    return
+                    raise UpstreamFailure(
+                        format_upstream_error(last_error_status, last_error_body, retries=retry_attempts),
+                        last_error_status,
+                    )
                 retry_attempts += 1
                 delay = compute_backoff(retry_attempts, retry_after_hint)
                 _log(f"[WARN] responses upstream retryable · attempt={retry_attempts}/{MAX_RETRIES} · sleep={delay:.1f}s · retry_after={retry_after_hint}")
@@ -1665,108 +1667,86 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                     continue
                 _log(f"[ERROR] responses stream break after emit(attempts={attempts}) · {type(e).__name__}: {e}")
                 _usage_error("upstream_connection_error")
-                try:
-                    emitted_any = True
-                    handler.wfile.write(emit_content_delta(0, f"\n\n[dcc-proxy] upstream stream broke: {type(e).__name__}"))
-                    handler.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    _usage_error("client_disconnected")
-                    pass
-                return
+                raise _connection_failure(e) from e
             except requests.RequestException as e:
                 _log(f"[ERROR] responses request failed: {e}")
                 _usage_error("upstream_connection_error")
-                try:
-                    emitted_any = True
-                    handler.wfile.write(emit_content_delta(0, f"[dcc-proxy] upstream error: {e}"))
-                    handler.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    _usage_error("client_disconnected")
-                    pass
-                return
+                raise _connection_failure(e) from e
 
-    try:
-        # ── failover 主循环:逐候选尝试 · 非链尾走软超时守卫 · 链尾走原样 retry ──
-        # 首帧一旦到达(emitted_any)即锁定当前候选,循环终止,绝不再切(硬约束)。
-        for i, cand in enumerate(chain):
-            candidate_attempts += 1
-            cu, cu_url, cu_headers, cu_payload = _build_responses_req(cand)
-            is_tail = (i == len(chain) - 1)
-            if not is_tail and CONFIG.max_candidates > 1:
-                # 非链尾:守卫连接 · 首字节超时/首帧前 429/5xx/连断 → 切下一候选
-                _log(f"→ responses {cu} · guarded(soft={soft_timeout:.0f}s) · cand={i+1}/{len(chain)} · url={cu_url} · input={len(input_messages)}")
-                _tl("gw_req", req_id=req_id, protocol="responses", url=cu_url, upstream_id=cu, payload=cu_payload, candidate=i + 1)
+    # ── failover 主循环:逐候选尝试 · 非链尾走软超时守卫 · 链尾走原样 retry ──
+    # 首帧一旦到达(emitted_any)即锁定当前候选,循环终止,绝不再切(硬约束)。
+    for i, cand in enumerate(chain):
+        candidate_attempts += 1
+        cu, cu_url, cu_headers, cu_payload = _build_responses_req(cand)
+        is_tail = (i == len(chain) - 1)
+        if not is_tail and CONFIG.max_candidates > 1:
+            # 非链尾:守卫连接 · 首字节超时/首帧前 429/5xx/连断 → 切下一候选
+            _log(f"→ responses {cu} · guarded(soft={soft_timeout:.0f}s) · cand={i+1}/{len(chain)} · url={cu_url} · input={len(input_messages)}")
+            _tl("gw_req", req_id=req_id, protocol="responses", url=cu_url, upstream_id=cu, payload=cu_payload, candidate=i + 1)
+            try:
+                conn = _guarded_connect(
+                    cu_url, cu_payload, cu_headers, soft_timeout=soft_timeout,
+                    decode_unicode=True, req_id=req_id, protocol="responses",
+                )
+            except _SoftTimeout:
+                _log(f"[WARN] responses {cu} 首字节 {soft_timeout:.0f}s 未响应 · 切下一候选")
+                _tl("failover", req_id=req_id, protocol="responses", reason="soft_timeout", from_id=cu, soft_timeout=soft_timeout)
+                continue
+            except _Upstream429 as e:
+                _log(f"[WARN] responses {cu} 首帧前 upstream {e.status} · switch_on_429={CONFIG.switch_on_429} · 切下一候选")
+                _tl("failover", req_id=req_id, protocol="responses", reason=f"upstream_{e.status}", from_id=cu)
+                continue
+            except _STREAM_RETRY_EXC as e:
+                _log(f"[WARN] responses {cu} 首帧前连接异常 · {type(e).__name__}: {e} · 切下一候选")
+                _tl("failover", req_id=req_id, protocol="responses", reason=type(e).__name__, from_id=cu)
+                continue
+            except requests.RequestException as e:
+                _log(f"[WARN] responses {cu} 连接失败 · {type(e).__name__}: {e} · 切下一候选")
+                _tl("failover", req_id=req_id, protocol="responses", reason=type(e).__name__, from_id=cu)
+                continue
+            # 守卫成功 · 首字节已到 · 锁定本候选 · 若非主模型则备好切换提示
+            if i > 0:
+                failover_to = cu
+                switch_notice["text"] = (
+                    f"[dcc] 主模型 {primary_id} 首字节 {soft_timeout:.0f}s 未响应 · 已切至 {cu}\n\n"
+                )
+                _log(f"[INFO] responses failover {primary_id} → {cu}(cand {i+1}/{len(chain)})")
+                _tl("failover_locked", req_id=req_id, protocol="responses", from_id=primary_id, to_id=cu, candidate=i + 1)
+            with conn.response:
                 try:
-                    conn = _guarded_connect(
-                        cu_url, cu_payload, cu_headers, soft_timeout=soft_timeout,
-                        decode_unicode=True, req_id=req_id, protocol="responses",
-                    )
-                except _SoftTimeout:
-                    _log(f"[WARN] responses {cu} 首字节 {soft_timeout:.0f}s 未响应 · 切下一候选")
-                    _tl("failover", req_id=req_id, protocol="responses", reason="soft_timeout", from_id=cu, soft_timeout=soft_timeout)
-                    continue
-                except _Upstream429 as e:
-                    _log(f"[WARN] responses {cu} 首帧前 upstream {e.status} · switch_on_429={CONFIG.switch_on_429} · 切下一候选")
-                    _tl("failover", req_id=req_id, protocol="responses", reason=f"upstream_{e.status}", from_id=cu)
-                    continue
-                except _STREAM_RETRY_EXC as e:
-                    _log(f"[WARN] responses {cu} 首帧前连接异常 · {type(e).__name__}: {e} · 切下一候选")
-                    _tl("failover", req_id=req_id, protocol="responses", reason=type(e).__name__, from_id=cu)
-                    continue
-                except requests.RequestException as e:
-                    _log(f"[WARN] responses {cu} 连接失败 · {type(e).__name__}: {e} · 切下一候选")
-                    _tl("failover", req_id=req_id, protocol="responses", reason=type(e).__name__, from_id=cu)
-                    continue
-                # 守卫成功 · 首字节已到 · 锁定本候选 · 若非主模型则备好切换提示
-                if i > 0:
-                    failover_to = cu
-                    switch_notice["text"] = (
-                        f"[dcc] 主模型 {primary_id} 首字节 {soft_timeout:.0f}s 未响应 · 已切至 {cu}\n\n"
-                    )
-                    _log(f"[INFO] responses failover {primary_id} → {cu}(cand {i+1}/{len(chain)})")
-                    _tl("failover_locked", req_id=req_id, protocol="responses", from_id=primary_id, to_id=cu, candidate=i + 1)
-                with conn.response:
-                    try:
-                        _consume_responses_stream(conn.iter_all())
-                    except _STREAM_RETRY_EXC as e:
-                        # 首帧后流断 → 保护关闭(不切;硬约束)· 首帧前(空响应)也在此收尾
-                        _log(f"[ERROR] responses stream break(guarded {cu}) · {type(e).__name__}: {e}")
-                        _usage_error("upstream_connection_error")
-                        try:
-                            emitted_any = True
-                            handler.wfile.write(emit_content_delta(0, f"\n\n[dcc-proxy] upstream stream broke: {type(e).__name__}"))
-                            handler.wfile.flush()
-                        except (BrokenPipeError, ConnectionResetError):
-                            _usage_error("client_disconnected")
-                            pass
-                break
-            else:
-                # 链尾(或唯一 · 或 max_candidates<=1):原样自 post + retry(零回归)
-                if i > 0:
-                    failover_to = cu
-                    switch_notice["text"] = (
-                        f"[dcc] 主模型 {primary_id} 首字节 {soft_timeout:.0f}s 未响应 · 已切至 {cu}\n\n"
-                    )
-                    _log(f"[INFO] responses failover {primary_id} → {cu}(链尾候选 {i+1}/{len(chain)})")
-                    _tl("failover_locked", req_id=req_id, protocol="responses", from_id=primary_id, to_id=cu, candidate=i + 1)
-                _log(f"→ responses {cu} · url={cu_url} · input={len(input_messages)}")
-                _tl("gw_req", req_id=req_id, protocol="responses", url=cu_url, upstream_id=cu, payload=cu_payload, candidate=i + 1)
-                _run_tail_with_retry(cu, cu_url, cu_headers, cu_payload)
-                break
-    finally:
-        if not text_block_stopped:
-            close_text_block()
-        for state in tool_states.values():
-            handler.wfile.write(emit_content_block_stop(state["block_idx"]))
-        handler.wfile.write(emit_message_delta(stop_reason, {"input_tokens": input_tokens, "output_tokens": output_tokens}))
-        handler.wfile.write(emit_message_stop())
-        handler.wfile.flush()
-        _tl(
-            "done", req_id=req_id, protocol="responses",
-            stop_reason=stop_reason, input_tokens=input_tokens, output_tokens=output_tokens,
-            tools_emitted=len(tool_states), emitted_any=emitted_any, dt=round(time.time() - t0, 3),
-            failover_to=failover_to, candidate_attempts=candidate_attempts,
-        )
+                    _consume_responses_stream(conn.iter_all())
+                except _STREAM_RETRY_EXC + (requests.RequestException,) as e:
+                    # 首帧后流断 → 保护关闭(不切;硬约束)· 首帧前(空响应)也在此收尾
+                    _log(f"[ERROR] responses stream break(guarded {cu}) · {type(e).__name__}: {e}")
+                    _usage_error("upstream_connection_error")
+                    raise _connection_failure(e) from e
+            break
+        else:
+            # 链尾(或唯一 · 或 max_candidates<=1):原样自 post + retry(零回归)
+            if i > 0:
+                failover_to = cu
+                switch_notice["text"] = (
+                    f"[dcc] 主模型 {primary_id} 首字节 {soft_timeout:.0f}s 未响应 · 已切至 {cu}\n\n"
+                )
+                _log(f"[INFO] responses failover {primary_id} → {cu}(链尾候选 {i+1}/{len(chain)})")
+                _tl("failover_locked", req_id=req_id, protocol="responses", from_id=primary_id, to_id=cu, candidate=i + 1)
+            _log(f"→ responses {cu} · url={cu_url} · input={len(input_messages)}")
+            _tl("gw_req", req_id=req_id, protocol="responses", url=cu_url, upstream_id=cu, payload=cu_payload, candidate=i + 1)
+            _run_tail_with_retry(cu, cu_url, cu_headers, cu_payload)
+            break
+    if not text_block_stopped:
+        close_text_block()
+    for state in tool_states.values():
+        handler.wfile.write(emit_content_block_stop(state["block_idx"]))
+    handler.wfile.write(emit_message_delta(stop_reason, {"input_tokens": input_tokens, "output_tokens": output_tokens}))
+    handler.wfile.write(emit_message_stop())
+    handler.wfile.flush()
+    _tl(
+        "done", req_id=req_id, protocol="responses",
+        stop_reason=stop_reason, input_tokens=input_tokens, output_tokens=output_tokens,
+        tools_emitted=len(tool_states), emitted_any=emitted_any, dt=round(time.time() - t0, 3),
+        failover_to=failover_to, candidate_attempts=candidate_attempts,
+    )
 
 
 # ============================================================
@@ -1814,6 +1794,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         _USAGE_LOCAL.metrics = metrics
         try:
             self._do_POST()
+        except UpstreamFailure as e:
+            self._record_failure(e)
+            self._send_json(e.status, e.payload)
         except (BrokenPipeError, ConnectionResetError):
             _usage_error("client_disconnected")
             raise
@@ -1827,6 +1810,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass
             _USAGE_LOCAL.metrics = None
+
+    def _record_failure(self, error: UpstreamFailure) -> None:
+        metrics = getattr(_USAGE_LOCAL, "metrics", None)
+        if metrics is not None and not metrics.error:
+            _usage_error("upstream_event_error")
+        _tl("done", req_id=getattr(self, "_dcc_req_id", ""),
+            status=error.status, error=str(error))
 
     def _do_POST(self) -> None:
         path = self._path_only()
@@ -1925,6 +1915,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     stream_anthropic_to_anthropic(self, model_name, m, body)
                 else:
                     stream_openai_to_anthropic(self, model_name, m, messages, extra, body, openai_chain)
+            except UpstreamFailure as e:
+                self._record_failure(e)
+                self.wfile.write(sse_event("error", e.payload))
+                self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 _usage_error("client_disconnected")
                 _log("client disconnected mid-stream")
@@ -2091,23 +2085,33 @@ def stream_anthropic_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                 dump_path = _dump_request(upstream_id, body, payload, body_preview)
                 if dump_path:
                     _log(f"[ERROR] 请求 body 已落盘: {dump_path}")
-                emitted_any = True
-                handler.wfile.write(emit_error(f"[dcc-proxy] anthropic {format_upstream_error(r.status_code, body_preview)}"))
-                handler.wfile.flush()
-                return True
+                raise UpstreamFailure(format_upstream_error(r.status_code, body_preview), r.status_code)
 
             # Anthropic ↔ Anthropic: 透传但恢复 SSE 空行分隔;message_start.message.model 覆写为
             # cc 端请求的 model 名(避免"我明明问 opus-4-7 · 上游回 Claude-Opus-4.7-joybuilder"的困惑)
             # 参 CCR features/anthropic-response-model.ts · 只重写 message_start 事件的 model 字段
             current_event: bytes | None = None
+            completed = False
             for raw_line in r.iter_lines():
                 if not raw_line:
                     continue
                 _tl("gw_chunk", req_id=req_id, protocol="anthropic", line=raw_line)
+                if raw_line.startswith(b"data:"):
+                    try:
+                        event_data = json.loads(raw_line[5:].strip())
+                    except (ValueError, TypeError):
+                        event_data = {}
+                    kind = event_data.get("type")
+                    if current_event == b"error" or kind == "error":
+                        error = event_data.get("error") or {}
+                        raise UpstreamFailure(str(error.get("message") or "upstream error"),
+                                              error_type=error.get("type") or "api_error")
+                    completed = completed or kind == "message_stop"
                 emitted_any = True
                 if raw_line.startswith(b"event:"):
                     current_event = raw_line.split(b":", 1)[1].strip()
-                    handler.wfile.write(raw_line + b"\n")
+                    if current_event != b"error":
+                        handler.wfile.write(raw_line + b"\n")
                 elif raw_line.startswith(b"data:") and current_event == b"message_start":
                     payload_data = raw_line[5:].strip()
                     try:
@@ -2127,6 +2131,8 @@ def stream_anthropic_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                     current_event = None
                 else:
                     handler.wfile.write(raw_line + b"\n")
+            if not completed:
+                raise UpstreamFailure("upstream stream ended before completion")
             return True
 
     attempts = 0
@@ -2139,11 +2145,10 @@ def stream_anthropic_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                 break
             if retry_attempts >= MAX_RETRIES:
                 _log(f"[ERROR] anthropic retryable status 超过 {MAX_RETRIES} 次 · 放弃 · last={last_error_status} body={last_error_body[:500]}")
-                emitted_any = True
-                msg = f"[dcc-proxy] anthropic {format_upstream_error(last_error_status, last_error_body, retries=retry_attempts)}"
-                handler.wfile.write(emit_error(msg))
-                handler.wfile.flush()
-                break
+                raise UpstreamFailure(
+                    format_upstream_error(last_error_status, last_error_body, retries=retry_attempts),
+                    last_error_status,
+                )
             retry_attempts += 1
             delay = compute_backoff(retry_attempts, retry_after_hint)
             _log(f"[WARN] anthropic upstream retryable · attempt={retry_attempts}/{MAX_RETRIES} · sleep={delay:.1f}s · retry_after={retry_after_hint}")
@@ -2155,23 +2160,11 @@ def stream_anthropic_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                 continue
             _log(f"[ERROR] anthropic stream break after emit(attempts={attempts}) · {type(e).__name__}: {e}")
             _usage_error("upstream_connection_error")
-            try:
-                handler.wfile.write(emit_error(f"[dcc-proxy] anthropic stream broke: {type(e).__name__}"))
-                handler.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                _usage_error("client_disconnected")
-                pass
-            break
+            raise _connection_failure(e) from e
         except requests.RequestException as e:
             _log(f"[ERROR] anthropic gateway connect failed: {e}")
             _usage_error("upstream_connection_error")
-            try:
-                handler.wfile.write(emit_error(f"[dcc-proxy] anthropic gateway connect: {e}"))
-                handler.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                _usage_error("client_disconnected")
-                pass
-            break
+            raise _connection_failure(e) from e
 
     _log(f"← done anthropic · dt={time.time()-t0:.1f}s")
     _tl("done", req_id=req_id, protocol="anthropic", emitted_any=emitted_any, dt=round(time.time() - t0, 3))

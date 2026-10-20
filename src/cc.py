@@ -1,20 +1,23 @@
 """CC 子进程编排:instances.json 落盘 + 前台起 claude。
 
 设计要点(与 dcc.md 对齐):
-- 每个 slot(1/2/3/...) → 一个 CC 实例,session 目录:<session_root>/<slot>-<local_name>
+- 每个 PID → 一个 CC 实例,同一 slot 可在多个终端运行
 - 前台运行(用户在终端交互 · 不 daemon 化):dcc <slot> 直接 exec claude,不 fork
-- 停止:只能停 daemon 化实例 · 前台由用户 Ctrl-C(仍记录到 instances.json 便于 status 展示)
+- 停止:向登记的实例发送 SIGTERM,前台也可由用户 Ctrl-C
 - 会话恢复 `--resume <session_id>`:透传 claude CLI 的 resume 参数
 - 环境变量清单:见 dcc.md 「多cc并行实例规则」段
 """
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import re
 import shutil
 import signal
 import time
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from .config import DccConfig, ModelSlot
@@ -36,14 +39,34 @@ def _load_instances(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {str(v["pid"]): v for v in data.values() if v.get("pid")}
     except json.JSONDecodeError:
         L.log(f"[WARN] instances.json 损坏,忽略", level="WARN")
         return {}
 
 
 def _save_instances(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=path.name + ".", delete=False) as f:
+            tmp = Path(f.name)
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+
+
+@contextmanager
+def _instances_lock(path: Path):
+    with path.with_suffix(path.suffix + ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -55,10 +78,15 @@ def _pid_alive(pid: int) -> bool:
 
 
 def prune_dead(cfg: DccConfig) -> dict:
-    data = _load_instances(cfg.instances_file)
-    alive = {k: v for k, v in data.items() if v.get("pid") and _pid_alive(int(v["pid"]))}
-    if len(alive) != len(data):
+    with _instances_lock(cfg.instances_file):
+        alive = _live_instances(cfg.instances_file)
         _save_instances(cfg.instances_file, alive)
+        return alive
+
+
+def _live_instances(path: Path) -> dict:
+    data = _load_instances(path)
+    alive = {k: v for k, v in data.items() if v.get("pid") and _pid_alive(int(v["pid"]))}
     return alive
 
 
@@ -216,8 +244,7 @@ def spawn(cfg: DccConfig, slot: ModelSlot, resume: str | None, extra_args: list[
 
 
 def _record_instance(cfg: DccConfig, slot: ModelSlot, resume: str | None) -> None:
-    data = prune_dead(cfg)
-    data[slot.slot] = {
+    entry = {
         "slot": slot.slot,
         "model": slot.local_name,
         "protocol": slot.protocol,
@@ -228,37 +255,42 @@ def _record_instance(cfg: DccConfig, slot: ModelSlot, resume: str | None) -> Non
         "mode": "foreground",
         "resume": resume or "",
     }
-    _save_instances(cfg.instances_file, data)
+    with _instances_lock(cfg.instances_file):
+        data = _live_instances(cfg.instances_file)
+        data[str(entry["pid"])] = entry
+        _save_instances(cfg.instances_file, data)
 
 
 def stop(cfg: DccConfig, slot_id: str) -> bool:
-    """停某 slot(仅当前 dcc 记录里 pid 存活时才 kill)。"""
-    data = prune_dead(cfg)
-    ent = data.get(slot_id)
-    if not ent:
-        L.log(f"CC #{slot_id} 未在跑")
-        return False
-    pid = int(ent["pid"])
-    if pid == os.getpid():
-        L.log(f"CC #{slot_id} 是当前进程 · 拒绝自杀")
-        return False
-    L.log(f"停止 CC #{slot_id} pid={pid}")
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError as e:
-        L.log(f"[WARN] SIGTERM 失败: {e}", level="WARN")
-    data.pop(slot_id, None)
-    _save_instances(cfg.instances_file, data)
-    return True
+    """停止该槽位的全部登记实例,至少成功发送一次信号时返回 True。"""
+    return _stop_instances(cfg, slot_id) > 0
 
 
 def stop_all(cfg: DccConfig) -> int:
-    data = prune_dead(cfg)
-    n = 0
-    for slot_id in list(data.keys()):
-        if stop(cfg, slot_id):
+    return _stop_instances(cfg)
+
+
+def _stop_instances(cfg: DccConfig, slot_id: str | None = None) -> int:
+    with _instances_lock(cfg.instances_file):
+        data = _live_instances(cfg.instances_file)
+        n = 0
+        for key, ent in list(data.items()):
+            if slot_id is not None and ent["slot"] != slot_id:
+                continue
+            pid = int(ent["pid"])
+            if pid == os.getpid():
+                L.log(f"CC #{ent['slot']} pid={pid} 是当前进程 · 拒绝自杀")
+                continue
+            L.log(f"停止 CC #{ent['slot']} pid={pid}")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError as e:
+                L.log(f"[WARN] SIGTERM 失败: {e}", level="WARN")
+                continue
+            data.pop(key)
             n += 1
-    return n
+        _save_instances(cfg.instances_file, data)
+        return n
 
 
 def list_instances(cfg: DccConfig) -> dict:
