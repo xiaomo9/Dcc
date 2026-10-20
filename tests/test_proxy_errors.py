@@ -17,22 +17,25 @@ class Upstream(http.server.BaseHTTPRequestHandler):
     protocol = 'openai'
     outcome = 'success'
     calls = 0
+    models = []
 
     def log_message(self, *args):
         pass
 
     def do_POST(self):
-        self.rfile.read(int(self.headers['Content-Length']))
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         type(self).calls += 1
-        status = {'bad_request': 400, 'limited': 429}.get(self.outcome, 200)
+        type(self).models.append(body['model'])
+        outcome = 'success' if body['model'] == 'other' else self.outcome
+        status = {'bad_request': 400, 'limited': 429}.get(outcome, 200)
         self.send_response(status)
-        if self.outcome == 'broken':
+        if outcome == 'broken':
             self.send_header('Transfer-Encoding', 'chunked')
         self.end_headers()
         if status != 200:
             self.wfile.write(b'{"error":"upstream rejected request"}')
             return
-        if self.outcome == 'empty':
+        if outcome == 'empty':
             return
         if self.protocol == 'openai':
             events = [{'choices': [{'delta': {'content': 'partial text'}, 'finish_reason': None}]}]
@@ -51,11 +54,11 @@ class Upstream(http.server.BaseHTTPRequestHandler):
                  'delta': {'type': 'text_delta', 'text': 'partial text'}}]
             finish = {'type': 'message_stop'}
             error = {'type': 'error', 'error': {'type': 'api_error', 'message': 'failed event'}}
-        if self.outcome == 'success':
+        if outcome == 'success':
             events.append(finish)
-        elif self.outcome == 'event_error':
+        elif outcome == 'event_error':
             events.append(error)
-        elif self.outcome == 'event_error_before_text':
+        elif outcome == 'event_error_before_text':
             events = [error]
         for event in events:
             frame = ('event: ' + event.get('type', 'chunk') + '\ndata: ' +
@@ -100,7 +103,7 @@ class ProxyErrorTests(unittest.TestCase):
             model['candidates'] = ['other']
             models.append({**model, 'name': 'other', 'upstream_id': 'other', 'candidates': []})
         proxy.CONFIG = proxy.Config({'port': 0, 'models': models})
-        Upstream.protocol, Upstream.calls = protocol, 0
+        Upstream.protocol, Upstream.calls, Upstream.models = protocol, 0, []
 
     def request(self, stream):
         return self.client.post(f'http://127.0.0.1:{self.server.server_port}/v1/messages',
@@ -180,3 +183,24 @@ class ProxyErrorTests(unittest.TestCase):
                     else:
                         self.assertEqual(response.json()['content'], [
                             {'type': 'text', 'text': 'partial text'}])
+
+    def test_guarded_http_errors_respect_switch_setting(self):
+        for protocol in ('openai', 'responses'):
+            for stream in (True, False):
+                for outcome, enabled, expected_models, status in (
+                    ('bad_request', True, ['mock'], 400),
+                    ('limited', False, ['mock'] * (1 + proxy.MAX_RETRIES), 429),
+                    ('limited', True, ['mock', 'other'], 200),
+                ):
+                    with self.subTest(protocol=protocol, stream=stream,
+                                      outcome=outcome, enabled=enabled):
+                        self.configure(protocol, guarded=True)
+                        proxy.CONFIG.switch_on_429 = enabled
+                        Upstream.outcome = outcome
+                        with patch.object(proxy, 'compute_backoff', return_value=0):
+                            response = self.request(stream)
+                        self.assertEqual(Upstream.models, expected_models)
+                        if status != 200:
+                            self.assert_failure(response, stream, status)
+                        else:
+                            self.assertEqual(response.status_code, 200)

@@ -123,7 +123,7 @@ class _SoftTimeout(Exception):
 
 
 class _Upstream429(Exception):
-    """首帧前上游返回可重试状态(429/5xx) · 供 failover 决定切换或退避。"""
+    """首帧前上游返回 HTTP 错误 · 供调用方决定报错、切换或退避。"""
 
     def __init__(self, status: int, body_preview: str, retry_after: str | None):
         super().__init__(f"upstream {status}")
@@ -182,11 +182,20 @@ def _guarded_connect(
     """连上游并在 soft_timeout 内等首个 SSE 行。
 
     成功 → 返回 _GuardedConn(response 保持打开 · 由调用方负责 close)。
-    首字节超时 → 关连接抛 _SoftTimeout。
-    首帧前遇上游 >=400 → 关连接抛 _Upstream429(带 status/body · 交调用方按可重试性决定切/退避/报错)。
+    首字节超时 → 关闭尚未移交的连接,抛 _SoftTimeout。
+    首帧前遇上游 >=400 → 关连接抛 _Upstream429(带 status/body · 交调用方决定报错、切换或退避)。
     首帧前连接异常 → 原样向上抛(由调用方现有逻辑处理)。
     """
     result_q: queue.Queue = queue.Queue(maxsize=1)
+    state_lock = threading.Lock()
+    state = {"cancelled": False, "response": None}
+
+    def _close_pending() -> None:
+        with state_lock:
+            response = state["response"]
+            state["response"] = None
+        if response is not None:
+            response.close()
 
     def _worker():
         try:
@@ -194,10 +203,17 @@ def _guarded_connect(
                 url, json=payload, headers=headers, stream=True,
                 timeout=(STREAM_CONNECT_TIMEOUT, STREAM_IDLE_TIMEOUT),
             )
+            with state_lock:
+                cancelled = state["cancelled"]
+                if not cancelled:
+                    state["response"] = r
+            if cancelled:
+                r.close()
+                return
             if r.status_code >= 400:
                 body_preview = r.text[:1500]
                 retry_after = r.headers.get("Retry-After")
-                r.close()
+                _close_pending()
                 result_q.put(("http_error", (r.status_code, body_preview, retry_after)))
                 return
             r.encoding = "utf-8"
@@ -215,6 +231,7 @@ def _guarded_connect(
                 return
             result_q.put(("ok", (r, first, line_iter)))
         except BaseException as e:  # noqa: BLE001 · 连接/读异常原样带回主线程判类型
+            _close_pending()
             result_q.put(("exc", e))
 
     t = threading.Thread(target=_worker, name=f"guard-{req_id}", daemon=True)
@@ -222,10 +239,15 @@ def _guarded_connect(
     try:
         kind, val = result_q.get(timeout=soft_timeout)
     except queue.Empty:
+        with state_lock:
+            state["cancelled"] = True
+        _close_pending()
         _log(f"[WARN] {protocol} 首字节 {soft_timeout:.0f}s 未到达 · req_id={req_id} · 判定慢")
         raise _SoftTimeout()
     if kind == "ok":
         r, first, rest = val
+        with state_lock:
+            state["response"] = None  # 已移交给调用方的 with conn.response
         return _GuardedConn(r, first, rest)
     if kind == "http_error":
         status, body_preview, retry_after = val
@@ -1352,11 +1374,16 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
             _consume_stream(r.iter_lines(decode_unicode=True, chunk_size=1))
         return True
 
-    def _run_tail_with_retry(upstream_id, url, headers, payload) -> None:
+    def _run_tail_with_retry(upstream_id, url, headers, payload, initial_error: _Upstream429 | None = None) -> None:
         """链尾候选的重试外层 · 完整保留改造前 openai 的 while-True 重试/保护关闭语义。"""
         nonlocal emitted_any
         attempts = 0
         retry_attempts = 0
+        if initial_error is not None:
+            retry_attempts = 1  # 守卫请求算首次失败,总请求次数仍为 MAX_RETRIES + 1
+            delay = compute_backoff(retry_attempts, initial_error.retry_after)
+            _log(f"[WARN] openai upstream retryable · attempt={retry_attempts}/{MAX_RETRIES} · sleep={delay:.1f}s")
+            time.sleep(delay)
         while True:
             attempts += 1
             try:
@@ -1408,9 +1435,15 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
                 _tl("failover", req_id=req_id, protocol="openai", reason="soft_timeout", from_id=cu, soft_timeout=soft_timeout)
                 continue
             except _Upstream429 as e:
-                _log(f"[WARN] openai {cu} 首帧前 upstream {e.status} · switch_on_429={CONFIG.switch_on_429} · 切下一候选")
-                _tl("failover", req_id=req_id, protocol="openai", reason=f"upstream_{e.status}", from_id=cu)
-                continue
+                if not is_retryable_status(e.status):
+                    raise UpstreamFailure(format_upstream_error(e.status, e.body_preview), e.status)
+                if CONFIG.switch_on_429:
+                    _log(f"[WARN] openai {cu} 首帧前 upstream {e.status} · 切下一候选")
+                    _tl("failover", req_id=req_id, protocol="openai", reason=f"upstream_{e.status}", from_id=cu)
+                    continue
+                last_error_status, last_error_body = e.status, e.body_preview
+                _run_tail_with_retry(cu, cu_url, cu_headers, cu_payload, e)
+                break
             except _STREAM_RETRY_EXC as e:
                 _log(f"[WARN] openai {cu} 首帧前连接异常 · {type(e).__name__}: {e} · 切下一候选")
                 _tl("failover", req_id=req_id, protocol="openai", reason=type(e).__name__, from_id=cu)
@@ -1639,11 +1672,16 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
             _consume_responses_stream(r.iter_lines(decode_unicode=True, chunk_size=1))
         return True
 
-    def _run_tail_with_retry(upstream_id, url, headers, payload) -> None:
+    def _run_tail_with_retry(upstream_id, url, headers, payload, initial_error: _Upstream429 | None = None) -> None:
         """链尾候选的重试外层 · 完整保留改造前 responses 的 while-True 重试/保护关闭语义。"""
         nonlocal emitted_any
         attempts = 0
         retry_attempts = 0
+        if initial_error is not None:
+            retry_attempts = 1  # 守卫请求算首次失败,总请求次数仍为 MAX_RETRIES + 1
+            delay = compute_backoff(retry_attempts, initial_error.retry_after)
+            _log(f"[WARN] responses upstream retryable · attempt={retry_attempts}/{MAX_RETRIES} · sleep={delay:.1f}s")
+            time.sleep(delay)
         while True:
             attempts += 1
             try:
@@ -1693,9 +1731,15 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
                 _tl("failover", req_id=req_id, protocol="responses", reason="soft_timeout", from_id=cu, soft_timeout=soft_timeout)
                 continue
             except _Upstream429 as e:
-                _log(f"[WARN] responses {cu} 首帧前 upstream {e.status} · switch_on_429={CONFIG.switch_on_429} · 切下一候选")
-                _tl("failover", req_id=req_id, protocol="responses", reason=f"upstream_{e.status}", from_id=cu)
-                continue
+                if not is_retryable_status(e.status):
+                    raise UpstreamFailure(format_upstream_error(e.status, e.body_preview), e.status)
+                if CONFIG.switch_on_429:
+                    _log(f"[WARN] responses {cu} 首帧前 upstream {e.status} · 切下一候选")
+                    _tl("failover", req_id=req_id, protocol="responses", reason=f"upstream_{e.status}", from_id=cu)
+                    continue
+                last_error_status, last_error_body = e.status, e.body_preview
+                _run_tail_with_retry(cu, cu_url, cu_headers, cu_payload, e)
+                break
             except _STREAM_RETRY_EXC as e:
                 _log(f"[WARN] responses {cu} 首帧前连接异常 · {type(e).__name__}: {e} · 切下一候选")
                 _tl("failover", req_id=req_id, protocol="responses", reason=type(e).__name__, from_id=cu)

@@ -225,7 +225,7 @@ B = 5,6,7,8
 ```ini
 [failover]
 soft_timeout = 12      # 首字节软超时秒数,超过判慢并切候选
-switch_on_429 = true   # 首帧前遇 429 是否立即切(false=交链尾候选走退避重试)
+switch_on_429 = true   # 首帧前遇可重试状态是否切候选(false=原模型退避重试)
 max_candidates = 3     # 单请求最多尝试候选数(含主模型),防雪崩;1=关闭自动切换
 ```
 
