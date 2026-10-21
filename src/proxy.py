@@ -8,6 +8,9 @@
 from __future__ import annotations
 
 import signal
+import hashlib
+import fcntl
+from contextlib import contextmanager
 import json
 import os
 import socket
@@ -65,24 +68,44 @@ def _trim_proxy_log(log_path: Path, keep: int = 200) -> None:
         pass
 
 
-def start(cfg: DccConfig) -> int:
+@contextmanager
+def _proxy_lock(cfg: DccConfig):
+    with cfg.proxy_pidfile.with_suffix(cfg.proxy_pidfile.suffix + ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def start(cfg: DccConfig, *, fixed_port: bool = False) -> int:
+    with _proxy_lock(cfg):
+        return _start_locked(cfg, fixed_port=fixed_port)
+
+
+def _start_locked(cfg: DccConfig, *, fixed_port: bool = False) -> int:
     """后台起代理子进程 · 通过 python -m src.proxy_server 入口。"""
     # 1. 探测可用端口 (如果配置端口被非本代理占用, 则偏移)
     original_port = cfg.port
-    max_retries = 10
+    max_retries = 1 if fixed_port else 10
     for i in range(max_retries):
         current_port = original_port + i
         if not is_port_open(current_port):
             cfg.port = current_port
             break
-        if _is_dcc_proxy(current_port):
+        if _is_dcc_proxy(current_port, for_vscode=fixed_port):
             cfg.port = current_port
+            _warn_config_change(cfg)
             L.log(f"dcc-proxy 已在跑 port={cfg.port}, 复用")
             # 校验 pidfile 是否一致, 不一致则更新(容错)
             existing_pid = read_pid(cfg.proxy_pidfile)
             if not existing_pid:
                 L.log(f"[WARN] port={cfg.port} 有效但无 pidfile, 外部恢复", level="WARN")
             return existing_pid or -1
+        if fixed_port:
+            L.log(f"[ERROR] 端口 {current_port} 被其他服务或不支持面板的旧版代理占用；"
+                  "旧版 dcc 请先运行 dcc stop，再运行 dcc start 更新；其他服务请释放端口", level="ERROR")
+            raise SystemExit(5)
         L.log(f"[WARN] port={current_port} 被占用(非 dcc), 尝试偏移...", level="WARN")
     else:
         L.log(f"[ERROR] 端口 {original_port} 及其后 {max_retries} 个端口均不可用", level="ERROR")
@@ -115,14 +138,33 @@ def start(cfg: DccConfig) -> int:
     return proc.pid
 
 
-def _is_dcc_proxy(port: int) -> bool:
+def _warn_config_change(cfg: DccConfig) -> None:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{cfg.port}/health", timeout=1) as r:
+            running = json.loads(r.read()).get("config_digest")
+    except (OSError, ValueError):
+        running = None
+    expected = hashlib.sha256(json.dumps(_config_data(cfg), sort_keys=True).encode()).hexdigest()
+    if running == expected:
+        return
+    reason = "配置已变化，后台代理仍使用旧配置" if running else "运行中代理未提供配置摘要，无法确认配置是否一致"
+    L.log(f"[WARN] {reason}；需要更新时请执行 dcc stop，再执行 dcc start；"
+          "dcc stop 会停止已登记的 CLI 实例并中断代理请求", level="WARN")
+
+
+def _is_dcc_proxy(port: int, *, for_vscode: bool = False) -> bool:
     """通过 /health 接口特征判断是否为 dcc 代理。"""
     url = f"http://127.0.0.1:{port}/health"
     try:
         with urllib.request.urlopen(url, timeout=1) as r:
             data = json.loads(r.read().decode("utf-8"))
             # dcc 响应特征: {"status": "ok"}
-            return data.get("status") == "ok"
+            return data.get("status") == "ok" and (
+                not for_vscode or (
+                    data.get("service") == "dcc-proxy"
+                    and "vscode" in data.get("capabilities", [])
+                )
+            )
     except Exception:
         return False
 
@@ -146,6 +188,22 @@ def _health_ok(port: int) -> bool:
 
 
 def stop_proxy(cfg: DccConfig) -> bool:
+    with _proxy_lock(cfg):
+        return _stop_proxy_locked(cfg)
+
+
+def restart(cfg: DccConfig) -> bool:
+    """在同一把锁内停止并按当前配置重新启动固定端口代理。"""
+    with _proxy_lock(cfg):
+        killed = _stop_proxy_locked(cfg)
+        if is_port_open(cfg.port):
+            L.log("[ERROR] 配置端口仍被占用，未完成重载；请检查占用进程后重试", level="ERROR")
+            raise SystemExit(5)
+        _start_locked(cfg, fixed_port=True)
+        return killed
+
+
+def _stop_proxy_locked(cfg: DccConfig) -> bool:
     """kill dcc 代理进程 · 返回 True=已杀,False=不在/已死。"""
     pid = read_pid(cfg.proxy_pidfile)
     if not pid:
@@ -193,7 +251,13 @@ def render_config_yaml(cfg: DccConfig) -> None:
     schema:
       {port, models: [{name, protocol, base_url, api_key, upstream_id, slot}]}
     """
-    data = {
+    data = _config_data(cfg)
+    cfg.proxy_config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    L.log(f"渲染 proxy config → {cfg.proxy_config_path} · models={len(cfg.slots)}")
+
+
+def _config_data(cfg: DccConfig) -> dict:
+    return {
         "port": cfg.port,
         "telemetry": cfg.telemetry,
         "retention_days": cfg.retention_days,
@@ -218,5 +282,3 @@ def render_config_yaml(cfg: DccConfig) -> None:
             for _slot_id, s in sorted(cfg.slots.items())
         ],
     }
-    cfg.proxy_config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    L.log(f"渲染 proxy config → {cfg.proxy_config_path} · models={len(cfg.slots)}")

@@ -95,6 +95,37 @@ class ProxyErrorTests(unittest.TestCase):
         proxy.CONFIG = self.old_config
         self.logging.stop()
 
+    def test_vscode_unknown_model_is_rejected_but_cli_fallback_still_works(self):
+        self.configure('openai')
+        Upstream.outcome = 'success'
+        for endpoint in ('messages', 'messages/count_tokens'):
+            for stream in (False, True):
+                url = f'http://127.0.0.1:{self.server.server_port}/v1/{endpoint}'
+                body = {'model': 'missing', 'messages': [], 'max_tokens': 20, 'stream': stream}
+                response = self.client.post(url, json=body, headers={'x-dcc-client': 'vscode'})
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json()['error']['type'], 'not_found_error')
+                self.assertIn('missing', response.json()['error']['message'])
+                response = self.client.post(url, json=body)
+                self.assertEqual(response.status_code, 200)
+                body['model'] = 'mock[1m]'
+                response = self.client.post(url, json=body, headers={'x-dcc-client': 'vscode'})
+                self.assertEqual(response.status_code, 200)
+
+    def test_vscode_slot_alias_reaches_its_model_instead_of_default(self):
+        self.configure('openai')
+        Upstream.outcome = 'success'
+        primary = proxy.CONFIG.models_by_name['mock']
+        primary['slot'] = '1'
+        other = {**primary, 'name': 'other', 'slot': '2', 'upstream_id': 'other'}
+        proxy.CONFIG = proxy.Config({'port': 0, 'models': [primary, other]})
+        response = self.client.post(
+            f'http://127.0.0.1:{self.server.server_port}/v1/messages',
+            json={'model': 'dcc-slot-2[1m]', 'messages': [], 'max_tokens': 20},
+            headers={'x-dcc-client': 'vscode'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Upstream.models[-1], 'other')
+
     def configure(self, protocol, guarded=False):
         model = {'name': 'mock', 'protocol': protocol, 'upstream_id': 'mock',
                  'base_url': f'http://127.0.0.1:{self.upstream.server_port}', 'api_key': 'test'}

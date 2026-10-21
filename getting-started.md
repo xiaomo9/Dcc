@@ -25,7 +25,7 @@ claude code ──Anthropic格式──▶ dcc(:4000) ──翻译──▶ 京�
      └──────────────────────────── 翻译回 Anthropic 格式 ◀──────────────────────┘
 ```
 
-**配置生效模型**：dcc 启动那刻把 `dcc.ini` + `~/.dm/llm.ini` 编译成一份 `config.json` 快照，常驻代理只认这份快照。**所以改完任何配置，必须 `dcc stop`（会重启代理）才生效**——这条贯穿全文，记住它。
+**配置生效模型**：dcc 启动那刻把 `dcc.ini` + `~/.dm/llm.ini` 编译成一份 `config.json` 快照，常驻代理只认这份快照。改完代理配置执行 `dcc reset` 重新加载；槽位列表变化时还要先执行 `dcc settings`，并重开 Claude 会话。
 
 ---
 
@@ -47,6 +47,8 @@ dcc 1 "只回复一个词:pong" --dangerously-skip-permissions
 ```
 
 不熟悉的话，从 §1 顺着往下走。
+
+使用 VS Code 的 Claude Code 聊天面板时，完成模型配置后依次执行 `dcc settings`、`dcc start`，再重新打开面板。第一条命令会备份并更新 `~/.claude/settings.json`，写入全部槽位，也会影响普通 `claude` 命令；权限、主题等其他配置保留。完整步骤和恢复方法见 [面板接入说明](dcc.md#vs-code-claude-code-聊天面板)。
 
 ---
 
@@ -229,7 +231,7 @@ switch_on_429 = true   # 首帧前遇可重试状态是否切候选(false=原模
 max_candidates = 3     # 单请求最多尝试候选数(含主模型),防雪崩;1=关闭自动切换
 ```
 
-改完同样要 `dcc stop` 重启生效。
+改完执行 `dcc reset` 重新加载。
 
 ### 观测（怎么确认切过）
 
@@ -245,14 +247,17 @@ max_candidates = 3     # 单请求最多尝试候选数(含主模型),防雪崩;
 |------|------|
 | `dcc list` | 列所有槽位（SLOT / CLI_NAME / LIMIT / IMG） |
 | `dcc status` | 代理 + 各 CC 实例运行状态 |
+| `dcc settings` | 备份并将全部槽位合并到 Claude 用户设置 |
+| `dcc start` | 只启动或复用配置端口的代理 |
+| `dcc reset` | 停全部登记实例和代理，再按当前配置启动代理 |
 | `dcc <slot>` | 起该槽位的交互式 claude code（自动拉起代理，已跑则复用） |
 | `dcc <slot> "prompt"` | 一次性问答，等价 `claude -p "prompt"` |
 | `dcc <slot> -r` | 恢复会话，进 claude 原生 `--resume` 选择器 |
 | `dcc <slot> -r <ID>` | 直接恢复指定会话 |
-| `dcc stop` | 停全部 CC + 杀代理 + 重启代理（**改完任何配置后必做**） |
+| `dcc stop` | 停止全部已登记 CC 实例和代理，不再自动重启 |
 | `dcc -v` / `dcc -h` | 版本 / 帮助 |
 
-同一槽位可在多个终端同时运行，`dcc status` 按 PID 列出全部已登记的存活实例。`dcc stop` 仍会停止全部登记实例并重启代理；停止信号发送失败的记录保留。旧实例文件会自动转为 PID 键格式，但此前被旧版覆盖丢失的记录无法恢复；更新后请统一使用新版启动终端。
+同一槽位可在多个终端同时运行，`dcc status` 按 PID 列出全部已登记的存活实例。`dcc stop` 会停止全部登记实例和代理；`dcc reset` 在此之后重新启动代理，两者都会中断正在运行的会话。停止信号发送失败的记录保留。旧实例文件会自动转为 PID 键格式，但此前被旧版覆盖丢失的记录无法恢复；更新后请统一使用新版启动终端。
 
 ---
 
@@ -262,9 +267,9 @@ OpenAI、Responses、Anthropic 的上游失败现统一返回明确错误：流�
 
 | 现象 | 原因 | 处理 |
 |------|------|------|
-| 改完 `.ini` 不生效 | 常驻代理用的是**启动那刻**编译的 `config.json`，不自动重读 | **`dcc stop`**（会重启代理），再 `dcc <slot>` |
+| 改完 `.ini` 不生效 | 常驻代理用的是**启动那刻**编译的 `config.json`，不自动重读 | 执行 `dcc reset`；槽位变化时先执行 `dcc settings` |
 | `dcc list` 少了某个 slot | dcc.ini `[models]` 引用的 section 名与 llm.ini 对不上 | 核对两处 section 名完全一致 |
-| 日志 `[WARN] 未知 model=xxx · 兜底路由到 default=…` | 代理内存模型表无此名（多半改了 section 名没重启） | 先 `dcc stop`；再核对 dcc.ini 与 llm.ini section 名 |
+| 日志 `[WARN] 未知 model=xxx · 兜底路由到 default=…` | 代理内存模型表无此名（多半改了 section 名没重启） | 先核对 dcc.ini 与 llm.ini section 名，再执行 `dcc reset` |
 | 回复的模型名不对（如配 Claude 实际回 GLM-5） | 网关不认该 model id，**静默兜底**到别的模型 | 核对 llm.ini 的 `model` 行填的是网关认得的真实 id |
 | rag 槽位卡住不返回 | ① 用了 `/anthropic` 端点（带 key 实发 55s 挂死）② rag 本身首字节慢 | ① 改成 `/v1` + `protocol=openai`；② 调大 `DCC_STREAM_IDLE_TIMEOUT` |
 | 返回上游 429 错误，重试后仍失败 | 网关侧限流（配额/突发） | 检查配额或稍后重试，也可手动换槽位；详见 [KI-01 最新状态](docs/known-issues.md) |

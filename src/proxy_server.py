@@ -33,6 +33,7 @@ config.json(由 src/proxy.py::render_config_yaml 写):
 from __future__ import annotations
 
 import http.server
+import hashlib
 import json
 import os
 import queue
@@ -259,6 +260,7 @@ def _guarded_connect(
 
 class Config:
     def __init__(self, data: dict):
+        self.config_digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
         self.port = int(data["port"])
         self.models_by_name: dict[str, dict] = {m["name"]: m for m in data.get("models", [])}
         self._default: dict | None = data["models"][0] if data.get("models") else None
@@ -267,7 +269,13 @@ class Config:
         self.switch_on_429: bool = bool(fo.get("switch_on_429", True))
         self.max_candidates: int = int(fo.get("max_candidates", 3))
 
-    def resolve(self, name: str) -> dict | None:
+    def resolve(self, name: str, *, strict: bool = False) -> dict | None:
+        if strict and name.startswith("dcc-slot-"):
+            for model in self.models_by_name.values():
+                alias = f"dcc-slot-{model.get('slot')}"
+                if name == alias or name.startswith(alias + "["):
+                    return model
+            return None
         if name in self.models_by_name:
             return self.models_by_name[name]
         # Claude Code 的模型后缀是上下文标记,不属于上游模型名。
@@ -276,7 +284,7 @@ class Config:
                 _log(f"[INFO] model={name} · 去除上下文标记后路由={base_name}")
                 return self.models_by_name[base_name]
         # 兜底:cc 端内部子任务或误传 · 路由到默认 slot 避免 404 中断
-        if self._default:
+        if self._default and not strict:
             _log(f"[WARN] 未知 model={name} · 兜底路由到 default={self._default['name']}")
             return self._default
         return None
@@ -1822,7 +1830,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa
         path = self._path_only()
         if path in ("/health", "/health/liveliness", "/api/hello"):
-            self._send_json(200, {"status": "ok", "version": DCC_VERSION})
+            self._send_json(200, {"status": "ok", "version": DCC_VERSION,
+                                  "service": "dcc-proxy", "capabilities": ["vscode"],
+                                  "config_digest": CONFIG.config_digest})
             return
         if path == "/v1/models":
             models = [
@@ -1879,7 +1889,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         model_name = body.get("model", "")
-        m = CONFIG.resolve(model_name)
+        m = CONFIG.resolve(model_name, strict=self.headers.get("x-dcc-client") == "vscode")
         req_id = uuid.uuid4().hex[:12]
         self._dcc_req_id = req_id  # stream_xxx 通过 handler 拿
         _tl(
@@ -1899,7 +1909,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         )
         if not m:
             _tl("done", req_id=req_id, phase="resolve", status=404, error=f"model not configured: {model_name}")
-            self._send_json(404, {"error": f"model not configured: {model_name}"})
+            self._send_json(404, {"type": "error", "error": {
+                "type": "not_found_error", "message": f"model not configured: {model_name}"}})
             return
 
         # 图文能力守卫:m.supports_images=false 时剥掉 body.messages 里所有 image · 记录数量
@@ -1933,7 +1944,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         stream = bool(body.get("stream", False))
         # openai 路 failover 候选链(同组同协议)· 主模型首字节软超时/首帧前 429 时切下一个
         # · responses/anthropic 暂不切(无同协议候选)· 走各自单模型逻辑
-        openai_chain = CONFIG.resolve_candidates(model_name)
+        openai_chain = CONFIG.resolve_candidates(m["name"])
 
         if stream:
             # 流式:SSE 直出
@@ -2038,9 +2049,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         model_name = body.get("model", "")
-        m = CONFIG.resolve(model_name)
+        m = CONFIG.resolve(model_name, strict=self.headers.get("x-dcc-client") == "vscode")
         if not m:
-            self._send_json(404, {"error": f"model not configured: {model_name}"})
+            self._send_json(404, {"type": "error", "error": {
+                "type": "not_found_error", "message": f"model not configured: {model_name}"}})
             return
 
         # 本地估算: 把 messages + system + tools 串成 UTF-8 字符串, len/4

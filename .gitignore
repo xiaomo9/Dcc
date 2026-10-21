@@ -4,3 +4,5 @@ agents/
 CLAUDE.md
 *.DS_Store
 .DS_Store
+.joycode
+.claude
