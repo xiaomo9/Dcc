@@ -21,7 +21,7 @@ HELP = f"""dcc v{DCC_VERSION} — 本地 CC 多模型代理管理器
 用法:
   dcc list                          列所有已配 slot(dcc.ini [models])
   dcc status                        代理/实例运行状态
-  dcc settings                      将全部槽位合并到 ~/.claude/settings.json（修改前备份）
+  dcc settings                      将全部槽位合并到 ~/.claude/settings.json
   dcc ui                            打开本机可视化配置面板（Ctrl-C 关闭）
   dcc start                         只启动/复用配置端口的代理，供 VS Code 面板使用
   dcc reset                         停全部已登记 CC 实例和代理，再按当前配置启动代理
@@ -83,13 +83,11 @@ def main(argv: list[str]) -> int:
             return 2
         path = Path.home() / ".claude/settings.json"
         try:
-            changed, backup = S.write(cfg, path)
+            changed = S.write(cfg, path)
         except (OSError, ValueError) as exc:
             L.log(f"无法更新 {path}: {exc}", level="ERROR")
             L.done(t0, ok=False, cmd="settings", rc=2)
             return 2
-        if backup is not None:
-            L.log(f"原配置备份: {backup}")
         L.log(f"{path} · {'已更新' if changed else '无需更新'} · 槽位={len(cfg.slots)}")
         L.log("请运行 dcc start，再重新打开 Claude 会话；普通 claude 与面板共用此配置")
         L.done(t0, ok=True, cmd="settings")

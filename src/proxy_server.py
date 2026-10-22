@@ -1323,7 +1323,6 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
                     st = {
                         "id": tool_id,
                         "name": name,
-                        "args_buf": "",
                         "block_idx": next_block_idx,
                         "started": False,
                     }
@@ -1339,7 +1338,6 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
                     st["started"] = True
                 args_part = fn.get("arguments")
                 if args_part:
-                    st["args_buf"] += args_part
                     if st["started"]:
                         emitted_any = True
                         handler.wfile.write(emit_tool_input_delta(st["block_idx"], args_part))

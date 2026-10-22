@@ -48,9 +48,9 @@ dcc 1 "只回复一个词:pong" --dangerously-skip-permissions
 
 不熟悉的话，从 §1 顺着往下走。
 
-使用 VS Code 的 Claude Code 聊天面板时，完成模型配置后依次执行 `dcc settings`、`dcc start`，再重新打开面板。第一条命令会备份并更新 `~/.claude/settings.json`，写入全部槽位，也会影响普通 `claude` 命令；权限、主题等其他配置保留。完整步骤和恢复方法见 [面板接入说明](dcc.md#vs-code-claude-code-聊天面板)。
+使用 VS Code 的 Claude Code 聊天面板时，完成模型配置后依次执行 `dcc settings`、`dcc start`，再重新打开面板。第一条命令会更新 `~/.claude/settings.json`，写入全部槽位，也会影响普通 `claude` 命令；权限、主题等其他配置保留。完整步骤见 [面板接入说明](dcc.md#vs-code-claude-code-聊天面板)。
 
-想用网页编辑模型和槽位时运行 `dcc ui`，浏览器会打开本机配置面板；保存会自动备份配置、同步变化的 Claude 模型列表并重载代理。保存会停止已登记的终端会话，请先结束正在进行的工作。操作范围和密钥显示说明见 [可视化配置面板](dcc.md#可视化配置面板)。
+想用网页编辑模型和槽位时运行 `dcc ui`，浏览器会打开本机配置面板；保存会写入配置、同步变化的 Claude 模型列表并重载代理。保存会停止已登记的终端会话，请先结束正在进行的工作。操作范围和密钥显示说明见 [可视化配置面板](dcc.md#可视化配置面板)。
 
 ---
 
@@ -249,7 +249,7 @@ max_candidates = 3     # 单请求最多尝试候选数(含主模型),防雪崩;
 |------|------|
 | `dcc list` | 列所有槽位（SLOT / CLI_NAME / LIMIT / IMG） |
 | `dcc status` | 代理 + 各 CC 实例运行状态 |
-| `dcc settings` | 备份并将全部槽位合并到 Claude 用户设置 |
+| `dcc settings` | 将全部槽位合并到 Claude 用户设置 |
 | `dcc ui` | 前台打开本机可视化配置面板，Ctrl-C 关闭 |
 | `dcc start` | 只启动或复用配置端口的代理 |
 | `dcc reset` | 停全部登记实例和代理，再按当前配置启动代理 |
