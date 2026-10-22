@@ -18,9 +18,9 @@ class SettingsTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / '.claude/settings.json'
         self.cfg = SimpleNamespace(port=4000, slots={
-            '2': SimpleNamespace(slot='2', local_name='first', model_suffix='[1m]',
+            '2': SimpleNamespace(slot='2', local_name='first',
                                  base_url='https://one.invalid', api_key='secret-one'),
-            '1': SimpleNamespace(slot='1', local_name='second', model_suffix='',
+            '1': SimpleNamespace(slot='1', local_name='second',
                                  base_url='https://two.invalid', api_key='secret-two'),
         })
 
@@ -32,14 +32,14 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertIsNone(backup)
         data = json.loads(self.path.read_text())
-        self.assertEqual(data['model'], 'dcc-slot-2[1m]')
-        self.assertEqual(data['env']['ANTHROPIC_MODEL'], 'dcc-slot-2[1m]')
+        self.assertEqual(data['model'], 'dcc-slot-2')
+        self.assertEqual(data['env']['ANTHROPIC_MODEL'], 'dcc-slot-2')
         self.assertEqual(data['env']['ANTHROPIC_BASE_URL'], 'http://127.0.0.1:4000')
         self.assertEqual(data['env']['ANTHROPIC_AUTH_TOKEN'], 'dummy')
         self.assertEqual(data['env']['ANTHROPIC_CUSTOM_HEADERS'], 'x-dcc-client: vscode')
         self.assertEqual(data['modelPicker'], {
             'replaceBuiltInOptions': True,
-            'options': [{'model': 'dcc-slot-2[1m]', 'label': '#2 · first'},
+            'options': [{'model': 'dcc-slot-2', 'label': '#2 · first'},
                         {'model': 'dcc-slot-1', 'label': '#1 · second'}]})
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         for value in ('secret-one', 'secret-two', 'https://one.invalid', 'https://two.invalid'):

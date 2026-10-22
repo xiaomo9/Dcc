@@ -248,5 +248,5 @@ class VSCodeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         captured = json.loads(result.stdout)
         self.assertEqual(captured['url'], f'http://127.0.0.1:{self.port + 1}')
-        self.assertEqual(captured['model'], 'second[1m]')
-        self.assertEqual(captured['args'][captured['args'].index('--model') + 1], 'second[1m]')
+        self.assertEqual(captured['model'], 'second')
+        self.assertEqual(captured['args'][captured['args'].index('--model') + 1], 'second')

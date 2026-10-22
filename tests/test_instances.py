@@ -17,7 +17,7 @@ def config(path):
 
 
 def slot(number='1'):
-    return SimpleNamespace(slot=number, local_name='mock', model_suffix='',
+    return SimpleNamespace(slot=number, local_name='mock',
                            context_window=None, protocol='openai', upstream_model_id='mock')
 
 
