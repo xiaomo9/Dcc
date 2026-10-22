@@ -9,7 +9,7 @@ import tempfile
 from .config import DccConfig
 
 
-def write(cfg: DccConfig, path: Path) -> tuple[bool, Path | None]:
+def write(cfg: DccConfig, path: Path) -> bool:
     slots = list(cfg.slots.values())
     if not slots:
         raise ValueError("未配置有效槽位，请检查 dcc.ini [models]")
@@ -49,19 +49,8 @@ def write(cfg: DccConfig, path: Path) -> tuple[bool, Path | None]:
                      "label": f"#{slot.slot} · {slot.local_name}"} for slot in slots],
     }}
     if data == existing:
-        return False, None
+        return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    backup = None
-    if original is not None:
-        try:
-            with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent,
-                                             prefix=path.name + ".dcc-backup-", delete=False) as f:
-                backup = Path(f.name)
-                f.write(original)
-        except OSError:
-            if backup is not None:
-                backup.unlink(missing_ok=True)
-            raise
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
@@ -73,4 +62,4 @@ def write(cfg: DccConfig, path: Path) -> tuple[bool, Path | None]:
     finally:
         if tmp is not None:
             tmp.unlink(missing_ok=True)
-    return True, backup
+    return True

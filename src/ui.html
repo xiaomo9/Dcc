@@ -79,6 +79,11 @@ h1 { margin: 0; font-size: 30px; line-height: 1.2; letter-spacing: -.04em }
 .badge.green { color: var(--green); background: #f0fdf4 }
 .badge.orange { color: var(--orange); background: #fffbeb }
 .badge.red { color: var(--red); background: #fef2f2 }
+.runtime-card { margin-bottom: 22px }
+.runtime-layout, .runtime-actions, .runtime-metrics { display: flex; align-items: center; flex-wrap: wrap; gap: 12px }
+.runtime-layout { justify-content: space-between }
+.runtime-metrics { gap: 10px 20px; color: var(--muted); font-size: 13px }
+.runtime-note { margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6 }
 .search-wrap { position: relative; width: min(310px,100%) }
 .search-wrap svg { position: absolute; left: 12px; top: 11px; color: #94a3b8 }
 .search-wrap .input { padding-left: 38px }
@@ -280,6 +285,15 @@ th button:hover { color: var(--blue) }
 <header class="topbar"><div class="topbar-inner"><span class="brand-mark" aria-hidden="true">d</span><span class="brand-name">dcc</span><span class="brand-separator"></span><span class="brand-subtitle">本地模型配置</span><span class="local-badge">● 仅本机访问</span></div></header>
 <main>
   <div class="page-heading"><div><p class="eyebrow">CONTROL CENTER</p><h1>配置面板</h1><p>管理模型入口、槽位路由与 Token 用量</p></div><span id="draft-pill" class="draft-pill">正在读取配置…</span></div>
+  <section class="surface runtime-card" aria-labelledby="runtime-title">
+    <div class="section-head"><div><h2 id="runtime-title">运行状态</h2><p>管理本机代理与已登记的 Claude CLI 实例。</p></div></div>
+    <div class="runtime-layout">
+      <div class="runtime-metrics" role="status" aria-live="polite"><span id="runtime-status" class="badge neutral">正在读取…</span><span>端口 <strong id="runtime-port">—</strong></span><span>PID <strong id="runtime-pid">—</strong></span><span>CLI 实例 <strong id="runtime-instances">—</strong></span></div>
+      <div class="runtime-actions"><button id="runtime-refresh" class="button" type="button">刷新状态</button><button id="sync-settings" class="button" type="button">同步 Claude 配置</button><button id="runtime-start" class="button" type="button">启动代理</button><button id="runtime-stop" class="button danger" type="button">停止全部</button><button id="runtime-reset" class="button primary" type="button">重启代理</button></div>
+    </div>
+    <p class="runtime-note">启动和重启使用磁盘上已保存的配置，未保存修改不参与。停止和重启会中断已登记的 CLI 会话及代理请求；停止后本面板仍可使用。实例数不包含 VS Code 面板会话。</p>
+    <p id="runtime-error" class="field-error" role="alert" hidden></p>
+  </section>
   <nav class="tabs" role="tablist" aria-label="页面分类">
     <button id="tab-models" type="button" role="tab" aria-controls="panel-models" aria-selected="true" tabindex="0">模型入口</button>
     <button id="tab-routing" type="button" role="tab" aria-controls="panel-routing" aria-selected="false" tabindex="-1">槽位与切换</button>
@@ -351,6 +365,9 @@ let dragging = null;
 let lastFocus = null;
 let toastTimer = null;
 let usageRequest = 0;
+let runtimeRequest = 0;
+let runtimeBusy = false;
+let saving = false;
 let usageSort = {key:'', descending:true};
 const snapshot = value => JSON.stringify({models:value.models, slots:value.slots, groups:value.groups, failover:value.failover});
 const isDirty = () => !!state && snapshot(state) !== baseline;
@@ -376,12 +393,109 @@ function toast(text, kind='success') {
 }
 function updateDirty() {
   const dirty = isDirty();
-  $('#save').disabled = !dirty;
+  updateRuntimeControls();
   $('#draft-pill').className = 'draft-pill'+(dirty?' dirty':state?' synced':'');
   $('#draft-pill').textContent = dirty ? '有未保存修改' : '配置已同步';
   if (dirty) status('有未保存修改，请保存并重载', 'dirty');
   else if (state) status('已读取配置 · 当前登记实例 '+state.instances+' 个', 'success');
 }
+function updateRuntimeControls() {
+  $('#save').disabled = saving || runtimeBusy || !isDirty();
+  for (const button of document.querySelectorAll('.runtime-actions button')) button.disabled = runtimeBusy || saving;
+}
+async function loadRuntime() {
+  const request = ++runtimeRequest;
+  try {
+    const value = await api('/api/runtime');
+    if (request !== runtimeRequest) return null;
+    const proxy = value.proxy;
+    const badge = $('#runtime-status');
+    badge.textContent = proxy.healthy ? '运行中' : proxy.pid || proxy.port_open ? '状态异常' : '已停止';
+    badge.className = 'badge '+(proxy.healthy ? 'green' : proxy.pid || proxy.port_open ? 'orange' : 'neutral');
+    $('#runtime-port').textContent = proxy.port;
+    $('#runtime-pid').textContent = proxy.pid || '—';
+    $('#runtime-instances').textContent = value.instances;
+    $('#runtime-error').hidden = true;
+    if (state) {
+      state.instances = value.instances;
+      if (!saving) updateDirty();
+    }
+    return value;
+  } catch (error) {
+    if (request !== runtimeRequest) return null;
+    $('#runtime-status').textContent = '读取失败';
+    $('#runtime-status').className = 'badge red';
+    for (const selector of ['#runtime-port','#runtime-pid','#runtime-instances']) $(selector).textContent = '—';
+    $('#runtime-error').textContent = error.message;
+    $('#runtime-error').hidden = false;
+    return null;
+  }
+}
+$('#runtime-refresh').onclick = async () => {
+  if (runtimeBusy || saving) return;
+  runtimeBusy = true;
+  updateRuntimeControls();
+  try {await loadRuntime();}
+  finally {runtimeBusy = false; updateRuntimeControls();}
+};
+async function runRuntime(action) {
+  if (runtimeBusy || saving) return;
+  runtimeBusy = true;
+  ++runtimeRequest;
+  updateRuntimeControls();
+  const label = {start:'启动代理',stop:'停止全部',reset:'重启代理'}[action];
+  let attempted = false;
+  let result = null;
+  try {
+    if (action !== 'start') {
+      const current = await loadRuntime();
+      if (!current) throw new Error('无法读取运行状态，请刷新后重试');
+      const detail = '将停止 '+current.instances+' 个已登记的 Claude CLI 实例'+(action === 'reset'?'，再按磁盘配置重启代理':'和代理')+'。正在进行的代理请求会中断，已停止的会话需手动恢复。未保存修改不会写入配置。';
+      if (!await confirmAction(label,detail,label)) return;
+    }
+    $('#runtime-status').textContent = '正在'+label+'…';
+    $('#runtime-status').className = 'badge orange';
+    attempted = true;
+    result = await api('/api/runtime',{action});
+  } catch (error) {
+    const message = error.message.startsWith(label+'失败') ? error.message : label+'失败：'+error.message;
+    toast(message+(action === 'start'?'':'；如会话已中断，请手动恢复。'),'error');
+  } finally {
+    if (attempted) {
+      const current = await loadRuntime();
+      if (result) {
+        const incomplete = current && (action === 'stop'
+          ? current.proxy.pid || current.proxy.port_open || current.instances
+          : !current.proxy.healthy || (action === 'reset' && current.instances));
+        if (!current) toast(label+'请求已完成，状态读取失败，请刷新确认。','error');
+        else if (incomplete) toast(label+'后仍有未停止实例或代理状态异常，请检查终端日志。','error');
+        else toast(label+'完成'+(action === 'start'?'':' · 已停止登记实例 '+result.stopped+' 个'),'success');
+      }
+    }
+    runtimeBusy = false;
+    updateRuntimeControls();
+  }
+}
+for (const action of ['start','stop','reset']) $('#runtime-'+action).onclick = () => runRuntime(action);
+$('#sync-settings').onclick = async () => {
+  if (runtimeBusy || saving) return;
+  runtimeBusy = true;
+  updateRuntimeControls();
+  const button = $('#sync-settings');
+  try {
+    if (!await confirmAction('同步 Claude 配置','按磁盘上已保存的槽位更新 ~/.claude/settings.json。普通 claude 与 VS Code Claude 面板共用此配置。未保存草稿不参与；同步后需确认代理已启动，并重新打开 Claude 会话。','同步配置')) return;
+    button.innerHTML = '<span class="spinner"></span> 正在同步';
+    const result = await api('/api/settings',{});
+    if (state) state.revisions.settings = result.settings_revision;
+    toast((result.changed?'Claude 配置已同步':'Claude 配置无变化，无需更新')+'。请确认代理已启动，并重新打开 Claude 会话。','success');
+  } catch (error) {
+    toast(error.message,'error');
+  } finally {
+    button.textContent = '同步 Claude 配置';
+    runtimeBusy = false;
+    updateRuntimeControls();
+  }
+};
 function emptyState(title, detail) {
   return '<div class="empty-state">'+icon('box')+'<strong>'+esc(title)+'</strong><p>'+esc(detail)+'</p></div>';
 }
@@ -757,23 +871,28 @@ $('#reload').onclick = async () => {
   await reload();
 };
 $('#save').onclick = async () => {
-  if (!isDirty()) return;
+  if (!isDirty() || saving || runtimeBusy) return;
   const button = $('#save');
-  button.disabled = true;
+  saving = true;
+  updateRuntimeControls();
+  let attempted = false;
   try {
     const current = await api('/api/state');
     if (!await confirmAction('保存并重载','保存后将停止 '+current.instances+' 个已登记的 Claude CLI 实例并重新加载代理。已停止的会话需要手动恢复。','保存并重载')) return;
     button.innerHTML = '<span class="spinner"></span> 正在保存';
     status('正在保存并重载代理…');
+    attempted = true;
     const result = await api('/api/save',state);
     const loaded = await reload();
-    if (loaded) toast(result.changed?'已保存并重载；停止 '+result.stopped+' 个实例。备份：'+(result.backups.join('、') || '无')+'。':'配置无变化，无需重载。','success');
+    if (loaded) toast(result.changed?'已保存并重载；停止 '+result.stopped+' 个实例。':'配置无变化，无需重载。','success');
   } catch (error) {
     status('保存失败：'+error.message,'error');
     toast('保存失败：'+error.message+'；如会话已中断，请手动恢复。','error');
   } finally {
+    if (attempted) await loadRuntime();
+    saving = false;
     button.textContent = '保存并重载';
-    button.disabled = !isDirty();
+    updateRuntimeControls();
   }
 };
 function known(value,count) {return count ? fmt(value) : '—';}
@@ -870,6 +989,7 @@ $('#usage-models').onclick=event => {
   $('#usage-models').innerHTML=renderUsageTable(usageData.models);
 };
 reload();
+$('#runtime-refresh').click();
 </script>
 </body>
 </html>

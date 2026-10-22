@@ -28,9 +28,8 @@ class SettingsTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_creates_all_slots_without_upstream_credentials(self):
-        changed, backup = settings.write(self.cfg, self.path)
-        self.assertTrue(changed)
-        self.assertIsNone(backup)
+        self.assertTrue(settings.write(self.cfg, self.path))
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
         data = json.loads(self.path.read_text())
         self.assertEqual(data['model'], 'dcc-slot-2')
         self.assertEqual(data['env']['ANTHROPIC_MODEL'], 'dcc-slot-2')
@@ -45,7 +44,7 @@ class SettingsTests(unittest.TestCase):
         for value in ('secret-one', 'secret-two', 'https://one.invalid', 'https://two.invalid'):
             self.assertNotIn(value, self.path.read_text())
 
-    def test_merges_existing_settings_with_exact_backup_and_idempotence(self):
+    def test_merges_existing_settings_without_extra_files_and_is_idempotent(self):
         original = {'env': {'KEEP': 'yes', 'ANTHROPIC_AUTH_TOKEN': 'old',
                             'CLAUDE_CODE_USE_BEDROCK': '1',
                             'ANTHROPIC_CUSTOM_HEADERS': 'X-Team: a\nx-DCC-client: old\nX-Trace: b'},
@@ -55,10 +54,8 @@ class SettingsTests(unittest.TestCase):
         self.path.parent.mkdir()
         raw = json.dumps(original, indent=4).encode() + b'\n\n'
         self.path.write_bytes(raw)
-        changed, backup = settings.write(self.cfg, self.path)
-        self.assertTrue(changed)
-        self.assertEqual(backup.read_bytes(), raw)
-        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(settings.write(self.cfg, self.path))
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
         data = json.loads(self.path.read_text())
         for key in ('theme', 'permissions', 'modelSettings'):
             self.assertEqual(data[key], original[key])
@@ -68,13 +65,14 @@ class SettingsTests(unittest.TestCase):
                          'X-Team: a\nX-Trace: b\nx-dcc-client: vscode')
         files = list(self.path.parent.iterdir())
         stamp = self.path.stat().st_mtime_ns
-        self.assertEqual(settings.write(self.cfg, self.path), (False, None))
+        self.assertFalse(settings.write(self.cfg, self.path))
         self.assertCountEqual(list(self.path.parent.iterdir()), files)
         self.assertEqual(self.path.stat().st_mtime_ns, stamp)
         self.cfg.port = 4001
-        _, second_backup = settings.write(self.cfg, self.path)
-        self.assertNotEqual(backup, second_backup)
-        self.assertEqual(backup.read_bytes(), raw)
+        self.assertTrue(settings.write(self.cfg, self.path))
+        self.assertEqual(json.loads(self.path.read_text())['env']['ANTHROPIC_BASE_URL'],
+                         'http://127.0.0.1:4001')
+        self.assertCountEqual(list(self.path.parent.iterdir()), files)
 
     def test_invalid_settings_and_empty_slots_leave_original_untouched(self):
         self.path.parent.mkdir()
@@ -91,11 +89,11 @@ class SettingsTests(unittest.TestCase):
             settings.write(self.cfg, self.path)
         self.assertEqual(list(self.path.parent.iterdir()), [])
 
-    def test_backup_and_atomic_replace_failures_keep_original(self):
+    def test_tempfile_and_atomic_replace_failures_keep_original(self):
         self.path.parent.mkdir()
         original = b'{"theme":"dark"}\n'
         self.path.write_bytes(original)
-        with patch.object(settings.tempfile, 'NamedTemporaryFile', side_effect=OSError('backup failed')):
+        with patch.object(settings.tempfile, 'NamedTemporaryFile', side_effect=OSError('disk full')):
             with self.assertRaises(OSError):
                 settings.write(self.cfg, self.path)
         self.assertEqual(self.path.read_bytes(), original)
@@ -104,12 +102,9 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 settings.write(self.cfg, self.path)
         self.assertEqual(self.path.read_bytes(), original)
-        backups = list(self.path.parent.glob('settings.json.dcc-backup-*'))
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(backups[0].read_bytes(), original)
-        self.assertEqual(len(list(self.path.parent.iterdir())), 2)
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
 
-    def test_settings_command_writes_and_reports_backup_without_starting_proxy(self):
+    def test_settings_command_writes_without_extra_files_or_starting_proxy(self):
         root = Path(self.tmp.name)
         shutil.copytree(Path(__file__).resolve().parents[1] / 'src', root / 'src',
                         ignore=shutil.ignore_patterns('__pycache__'))
@@ -130,8 +125,8 @@ class SettingsTests(unittest.TestCase):
 
         result = run('settings')
         self.assertEqual(result.returncode, 0, result.stderr)
-        backup = next(self.path.parent.glob('settings.json.dcc-backup-*'))
-        self.assertIn(str(backup), result.stderr)
+        self.assertIn('已更新', result.stderr)
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
         self.assertFalse((root / 'output/dcc-proxy.pid').exists())
         self.assertFalse((root / 'output/instances.json').exists())
         result = run('settings')
