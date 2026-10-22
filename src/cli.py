@@ -22,6 +22,7 @@ HELP = f"""dcc v{DCC_VERSION} — 本地 CC 多模型代理管理器
   dcc list                          列所有已配 slot(dcc.ini [models])
   dcc status                        代理/实例运行状态
   dcc settings                      将全部槽位合并到 ~/.claude/settings.json（修改前备份）
+  dcc ui                            打开本机可视化配置面板（Ctrl-C 关闭）
   dcc start                         只启动/复用配置端口的代理，供 VS Code 面板使用
   dcc reset                         停全部已登记 CC 实例和代理，再按当前配置启动代理
   dcc <slot> [-r|--resume [ID]]       起 slot 对应模型的 CC；-r 无 ID 进入恢复选择 · -r <ID> 直接恢复指定会话
@@ -53,6 +54,14 @@ def main(argv: list[str]) -> int:
     if ns.help or not ns.cmd:
         print(HELP, file=sys.stderr)
         L.done(t0, ok=True, cmd="help")
+        return 0
+
+    if ns.cmd == "ui":
+        if ns.arg or extra or ns.resume is not None:
+            L.log("用法: dcc ui（不接槽位或其他参数）", level="ERROR")
+            return 2
+        from . import ui
+        ui.run(Path(__file__).parent.parent / "dcc.ini", Path.home() / ".claude/settings.json")
         return 0
 
     cfg = load_config()

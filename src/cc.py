@@ -204,7 +204,7 @@ def spawn(cfg: DccConfig, slot: ModelSlot, resume: str | None, extra_args: list[
         "CLAUDE_CODE_SUBSCRIPTION_TYPE",
     ):
         env.pop(k, None)
-    cc_model = f"{slot.local_name}{slot.model_suffix}"
+    cc_model = slot.local_name
     env["ANTHROPIC_AUTH_TOKEN"] = "dummy"
     env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{cfg.port}"
     env["ANTHROPIC_MODEL"] = cc_model

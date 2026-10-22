@@ -279,6 +279,6 @@ def _config_data(cfg: DccConfig) -> dict:
                 "group": s.group,
                 "candidates": s.candidates,
             }
-            for _slot_id, s in sorted(cfg.slots.items())
+            for s in cfg.slots.values()
         ],
     }

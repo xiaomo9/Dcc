@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import queue
+import sqlite3
 import socketserver
 import sys
 import threading
@@ -50,6 +51,7 @@ import urllib3
 
 from traffic_log import ExecLog, TrafficLog
 from telemetry import Telemetry, RequestMetrics
+from token_usage import RequestUsage, UsageStore
 from retry_policy import compute_backoff, format_upstream_error, is_retryable_status, MAX_RETRIES
 
 
@@ -278,7 +280,7 @@ class Config:
             return None
         if name in self.models_by_name:
             return self.models_by_name[name]
-        # Claude Code 的模型后缀是上下文标记,不属于上游模型名。
+        # 兼容旧会话中带上下文后缀的模型 ID，不将后缀发给上游。
         for base_name in self.models_by_name:
             if name.startswith(base_name) and name[len(base_name):].startswith("["):
                 _log(f"[INFO] model={name} · 去除上下文标记后路由={base_name}")
@@ -310,6 +312,7 @@ class Config:
 
 CONFIG: Config
 USAGE: Telemetry | None = None
+STATS: UsageStore | None = None
 _USAGE_LOCAL = threading.local()
 
 def _usage_error(reason: str) -> None:
@@ -334,6 +337,12 @@ def _tl(kind: str, **fields) -> None:
     if metrics is not None:
         try:
             metrics.observe(kind, fields)
+        except Exception:
+            pass
+    stats = getattr(_USAGE_LOCAL, "stats", None)
+    if stats is not None:
+        try:
+            stats.observe(kind, fields)
         except Exception:
             pass
 
@@ -1360,6 +1369,7 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
         """
         nonlocal emitted_any, retry_after_hint, last_error_status, last_error_body
         retry_after_hint = None
+        _tl("gw_attempt", req_id=req_id, protocol="openai", upstream_id=upstream_id)
         with requests.post(
             url, json=payload, headers=headers, stream=True,
             timeout=(STREAM_CONNECT_TIMEOUT, STREAM_IDLE_TIMEOUT),
@@ -1434,6 +1444,7 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
             _log(f"→ openai {cu} · guarded(soft={soft_timeout:.0f}s) · cand={i+1}/{len(chain)} · url={cu_url} · msgs={len(messages)}")
             _tl("gw_req", req_id=req_id, protocol="openai", url=cu_url, upstream_id=cu, payload=cu_payload, candidate=i + 1)
             try:
+                _tl("gw_attempt", req_id=req_id, protocol="openai", upstream_id=cu)
                 conn = _guarded_connect(
                     cu_url, cu_payload, cu_headers, soft_timeout=soft_timeout,
                     decode_unicode=True, req_id=req_id, protocol="openai",
@@ -1659,6 +1670,7 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
         """
         nonlocal emitted_any, retry_after_hint, last_error_status, last_error_body
         retry_after_hint = None
+        _tl("gw_attempt", req_id=req_id, protocol="responses", upstream_id=upstream_id)
         with requests.post(
             url, json=payload, headers=headers, stream=True,
             timeout=(STREAM_CONNECT_TIMEOUT, STREAM_IDLE_TIMEOUT),
@@ -1730,6 +1742,7 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
             _log(f"→ responses {cu} · guarded(soft={soft_timeout:.0f}s) · cand={i+1}/{len(chain)} · url={cu_url} · input={len(input_messages)}")
             _tl("gw_req", req_id=req_id, protocol="responses", url=cu_url, upstream_id=cu, payload=cu_payload, candidate=i + 1)
             try:
+                _tl("gw_attempt", req_id=req_id, protocol="responses", upstream_id=cu)
                 conn = _guarded_connect(
                     cu_url, cu_payload, cu_headers, soft_timeout=soft_timeout,
                     decode_unicode=True, req_id=req_id, protocol="responses",
@@ -1846,6 +1859,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa
         metrics = RequestMetrics(USAGE) if USAGE is not None and USAGE.enabled else None
         _USAGE_LOCAL.metrics = metrics
+        _USAGE_LOCAL.stats = RequestUsage(STATS) if STATS is not None else None
         try:
             self._do_POST()
         except UpstreamFailure as e:
@@ -1864,6 +1878,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass
             _USAGE_LOCAL.metrics = None
+            _USAGE_LOCAL.stats = None
 
     def _record_failure(self, error: UpstreamFailure) -> None:
         metrics = getattr(_USAGE_LOCAL, "metrics", None)
@@ -2125,6 +2140,7 @@ def stream_anthropic_to_anthropic(handler: "ProxyHandler", model_name: str, mode
         """返回 True=正常读完 · False=可重试 status(首帧前)· 抛异常=流断。"""
         nonlocal emitted_any, retry_after_hint, last_error_status, last_error_body
         retry_after_hint = None
+        _tl("gw_attempt", req_id=req_id, protocol="anthropic", upstream_id=upstream_id)
         with requests.post(
             url, json=payload, headers=headers, stream=True,
             timeout=(STREAM_CONNECT_TIMEOUT, STREAM_IDLE_TIMEOUT),
@@ -2265,7 +2281,7 @@ def main() -> None:
     if not cfg_path.exists():
         print(f"config not found: {cfg_path}", file=sys.stderr)
         sys.exit(2)
-    global CONFIG, DUMP_DIR, TL, EL, USAGE
+    global CONFIG, DUMP_DIR, TL, EL, USAGE, STATS
     CONFIG = Config(json.loads(cfg_path.read_text(encoding="utf-8")))
     DUMP_DIR = cfg_path.parent / "dumps"
     log_dir = cfg_path.parent / "log"
@@ -2283,6 +2299,11 @@ def main() -> None:
     server = ThreadingHTTPServer(("0.0.0.0", CONFIG.port), ProxyHandler)
     USAGE = Telemetry(cfg_path.parent / "telemetry", _cfg_data.get("telemetry", {}), DCC_VERSION)
     USAGE.start()
+    try:
+        STATS = UsageStore(cfg_path.parent / "token_usage.sqlite3")
+    except (OSError, sqlite3.Error) as error:
+        STATS = None
+        _log(f"[WARN] 本地 Token 统计不可用: {type(error).__name__}")
     _log(f"========== dcc-proxy version={DCC_VERSION} ==========")
     _log(f"dcc-proxy listening on 0.0.0.0:{CONFIG.port} · models={list(CONFIG.models_by_name)}")
     _log(f"dump dir = {DUMP_DIR}(遇 400 时落盘请求 body,滚动保留 {DUMP_KEEP} 份)")

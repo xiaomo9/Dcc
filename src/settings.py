@@ -28,7 +28,7 @@ def write(cfg: DccConfig, path: Path) -> tuple[bool, Path | None]:
     headers = [line for line in headers.splitlines()
                if line.partition(":")[0].strip().lower() != "x-dcc-client"]
     headers.append("x-dcc-client: vscode")
-    default = f"dcc-slot-{slots[0].slot}{slots[0].model_suffix}"
+    default = f"dcc-slot-{slots[0].slot}"
     env = {**old_env,
         "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{cfg.port}",
         "ANTHROPIC_AUTH_TOKEN": "dummy",
@@ -45,7 +45,7 @@ def write(cfg: DccConfig, path: Path) -> tuple[bool, Path | None]:
         env[f"ANTHROPIC_DEFAULT_{family}_MODEL_NAME"] = default
     data = {**existing, "env": env, "model": default, "modelPicker": {
         "replaceBuiltInOptions": True,
-        "options": [{"model": f"dcc-slot-{slot.slot}{slot.model_suffix}",
+        "options": [{"model": f"dcc-slot-{slot.slot}",
                      "label": f"#{slot.slot} · {slot.local_name}"} for slot in slots],
     }}
     if data == existing:

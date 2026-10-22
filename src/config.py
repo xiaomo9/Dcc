@@ -11,7 +11,6 @@ from pathlib import Path
 class ModelSlot:
     slot: str
     local_name: str          # cc 端 ANTHROPIC_MODEL 用这个
-    model_suffix: str        # cc 端模型名后缀，如 [1m]
     section: str             # llm.ini 里的 section 名
     base_url: str            # llm.ini section.base_url · 决定走哪个 endpoint
     api_key: str             # llm.ini section.api_key
@@ -76,7 +75,6 @@ def load(ini_path: Path | None = None) -> DccConfig:
         p.get("cc", "instances_file", fallback=str(output_dir / "instances.json"))
     ).expanduser()
 
-    default_model_suffix = p.get("defaults", "model_suffix", fallback="[1m]").strip()
     default_context_window = p.get("defaults", "context_window", fallback="800k")
 
     failover = FailoverConfig(
@@ -99,7 +97,6 @@ def load(ini_path: Path | None = None) -> DccConfig:
             slots[slot] = ModelSlot(
                 slot=slot,
                 local_name=p.get("model_names", slot, fallback=_derive_local_name(section)).strip(),
-                model_suffix=p.get("model_suffix", slot, fallback=default_model_suffix).strip(),
                 section=section,
                 base_url=sec["base_url"].rstrip("/"),
                 api_key=sec["api_key"],
