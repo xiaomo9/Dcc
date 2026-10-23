@@ -10,13 +10,14 @@
 from __future__ import annotations
 
 import json
-import fcntl
+from .platform_support import fcntl, pid_alive
 import os
 import re
 import shutil
 import signal
 import time
 import tempfile
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -31,6 +32,9 @@ def resolve_cc_binary(cfg: DccConfig) -> str:
     p = shutil.which("claude")
     if p:
         return p
+    native = Path.home() / ".local/bin" / ("claude.exe" if os.name == "nt" else "claude")
+    if native.is_file():
+        return str(native)
     L.log("[ERROR] 找不到 claude CLI,请设 dcc.ini [cc] binary", level="ERROR")
     raise SystemExit(5)
 
@@ -70,11 +74,7 @@ def _instances_lock(path: Path):
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    return pid_alive(pid)
 
 
 def prune_dead(cfg: DccConfig) -> dict:
@@ -234,23 +234,34 @@ def spawn(cfg: DccConfig, slot: ModelSlot, resume: str | None, extra_args: list[
             argv.append(resume)
     argv += extra_args
 
-    _record_instance(cfg, slot, resume)
+    if os.name != "nt":
+        _record_instance(cfg, slot, resume)
     clean_injected_history()  # 启动前剥掉历史里的 dcc 切换提示前缀 · 防模型模仿瞎提示
     L.log(
         f"启动 CC #{slot.slot} · model={slot.local_name} · cwd={os.getcwd()}"
         + (f" · resume={resume}" if resume else "")
     )
+    if os.name == "nt":
+        proc = subprocess.Popen(argv, env=env)
+        try:
+            _record_instance(cfg, slot, resume, pid=proc.pid)
+            return proc.wait()
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait()
+            prune_dead(cfg)
     os.execvpe(cc, argv, env)  # noqa: SLF001 (never returns)
 
 
-def _record_instance(cfg: DccConfig, slot: ModelSlot, resume: str | None) -> None:
+def _record_instance(cfg: DccConfig, slot: ModelSlot, resume: str | None, *, pid: int | None = None) -> None:
     entry = {
         "slot": slot.slot,
         "model": slot.local_name,
         "protocol": slot.protocol,
         "upstream": slot.upstream_model_id,
         "cwd": os.getcwd(),
-        "pid": os.getpid(),
+        "pid": pid if pid is not None else os.getpid(),
         "started_at": _now_str(),
         "mode": "foreground",
         "resume": resume or "",

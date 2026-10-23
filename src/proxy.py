@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import signal
 import hashlib
-import fcntl
+from .platform_support import fcntl, pid_alive
 from contextlib import contextmanager
 import json
 import os
@@ -42,11 +42,7 @@ def read_pid(pidfile: Path) -> int | None:
         return None
     if pid <= 0:
         return None
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return None
-    return pid
+    return pid if pid_alive(pid) else None
 
 
 def _trim_proxy_log(log_path: Path, keep: int = 200) -> None:
@@ -117,7 +113,9 @@ def _start_locked(cfg: DccConfig, *, fixed_port: bool = False) -> int:
     server_py = Path(__file__).parent / "proxy_server.py"
     _trim_proxy_log(cfg.proxy_log)
     logf = cfg.proxy_log.open("ab")
-    cmd = [sys.executable, str(server_py), str(cfg.proxy_config_path)]
+    cmd = ([sys.executable, "--serve-proxy", str(cfg.proxy_config_path)]
+           if getattr(sys, "frozen", False) else
+           [sys.executable, str(server_py), str(cfg.proxy_config_path)])
     L.log(f"启动 dcc-proxy: {' '.join(cmd)}")
     proc = subprocess.Popen(
         cmd,
@@ -125,6 +123,7 @@ def _start_locked(cfg: DccConfig, *, fixed_port: bool = False) -> int:
         stderr=logf,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     cfg.proxy_pidfile.write_text(str(proc.pid))
     L.log(f"proxy 主进程 pid={proc.pid},等待端口就绪…")
@@ -214,7 +213,7 @@ def _stop_proxy_locked(cfg: DccConfig) -> bool:
         os.kill(pid, signal.SIGTERM)
         time.sleep(0.3)
         if _pid_alive(pid):
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
             time.sleep(0.3)
         cfg.proxy_pidfile.unlink(missing_ok=True)
     except OSError as e:
@@ -224,11 +223,7 @@ def _stop_proxy_locked(cfg: DccConfig) -> bool:
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    return pid_alive(pid)
 
 
 def status(cfg: DccConfig) -> dict:

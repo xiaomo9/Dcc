@@ -49,13 +49,14 @@ class DccConfig:
 
 
 def load(ini_path: Path | None = None) -> DccConfig:
-    ini = ini_path or (Path(__file__).parent.parent / "dcc.ini")
+    from .app_paths import config_path
+    ini = ini_path or config_path()
     if not ini.exists():
         print(f"❌ dcc.ini 不存在: {ini}", file=sys.stderr)
         sys.exit(2)
 
     p = configparser.ConfigParser()
-    p.read(ini)
+    p.read(ini, encoding="utf-8")
 
     port = p.getint("proxy", "port", fallback=4000)
     llm_ini_path = Path(p.get("proxy", "llm_ini_path", fallback="~/.dm/llm.ini")).expanduser()
@@ -205,7 +206,7 @@ def _load_llm_ini(path: Path) -> dict[str, dict[str, str]]:
         print(f"❌ llm.ini 不存在: {path}", file=sys.stderr)
         sys.exit(2)
     p = configparser.ConfigParser()
-    p.read(path)
+    p.read(path, encoding="utf-8")
     out: dict[str, dict[str, str]] = {}
     for sec in p.sections():
         out[sec] = {k: p.get(sec, k) for k in p.options(sec) if k not in p.defaults()}

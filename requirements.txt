@@ -1,0 +1,2 @@
+requests>=2.32.4,<3
+psutil>=7,<8; sys_platform == "win32"

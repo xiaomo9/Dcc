@@ -61,7 +61,8 @@ def main(argv: list[str]) -> int:
             L.log("用法: dcc ui（不接槽位或其他参数）", level="ERROR")
             return 2
         from . import ui
-        ui.run(Path(__file__).parent.parent / "dcc.ini", Path.home() / ".claude/settings.json")
+        from .app_paths import config_path
+        ui.run(config_path(), Path.home() / ".claude/settings.json")
         return 0
 
     cfg = load_config()
@@ -184,5 +185,4 @@ def _cmd_start_slot(
                 durationMs=round((time.monotonic() - started) * 1000))
     L.done(t0, ok=True, slot=slot.slot, model=slot.local_name, resume=resume or "-")
     # 之后 exec 替换进程,不再返回
-    CC.spawn(cfg, slot, resume, extra)
-    return 0  # 到不了
+    return CC.spawn(cfg, slot, resume, extra)

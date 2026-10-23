@@ -6,3 +6,7 @@ CLAUDE.md
 .DS_Store
 .joycode
 .claude
+
+build/
+dist/
+.venv-release/

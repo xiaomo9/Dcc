@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import configparser
 from contextlib import contextmanager
-import fcntl
+from .platform_support import fcntl
 import hashlib
 import http.server
 import json
@@ -161,7 +161,7 @@ def _replace_atomic(path: Path, raw: bytes, mode: int | None = None) -> None:
                                          prefix=path.name + ".", delete=False) as f:
             tmp = Path(f.name)
             f.write(raw)
-            if mode is not None:
+            if mode is not None and hasattr(os, "fchmod"):
                 os.fchmod(f.fileno(), mode)
         os.replace(tmp, path)
     finally:
@@ -260,7 +260,7 @@ class ConfigEditor:
 
     def usage_summary(self, days: int) -> dict:
         dcc = configparser.ConfigParser()
-        dcc.read(self.dcc_path)
+        dcc.read(self.dcc_path, encoding="utf-8")
         output_dir = Path(dcc.get("output", "dir", fallback=str(self.dcc_path.parent / "output/dcc"))).expanduser()
         store = UsageStore(output_dir / "token_usage.sqlite3")
         store.import_logs(output_dir / "log")
