@@ -183,6 +183,45 @@ class ConfigUITests(unittest.TestCase):
         self.assertEqual(result, {'proxy': proxy, 'instances': 1})
         self.assertNotIn('secret-one', json.dumps(result))
 
+    def test_runtime_status_rejects_other_healthy_services(self):
+        class HealthService(http.server.BaseHTTPRequestHandler):
+            body = b''
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(self.body)
+
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), HealthService)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.dcc.write_text(self.dcc.read_text().replace('port = 4000', f'port = {server.server_port}'))
+        try:
+            with self.runtime_server() as request:
+                for body, healthy in (
+                    (b'{"status":"ok"}', False),
+                    (b'{"status":"ok","service":"other","capabilities":["vscode"]}', False),
+                    (b'not json', False),
+                    (b'[]', False),
+                    (b'{"status":"ok","service":"dcc-proxy","capabilities":["vscode"]}', True),
+                ):
+                    with self.subTest(body=body):
+                        HealthService.body = body
+                        proxy = request()['proxy']
+                        self.assertTrue(proxy['port_open'])
+                        self.assertIsNone(proxy['pid'])
+                        self.assertEqual(proxy['healthy'], healthy)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        proxy = self.editor.runtime_status()['proxy']
+        self.assertFalse(proxy['port_open'])
+        self.assertFalse(proxy['healthy'])
+
     def test_runtime_waits_for_configuration_save(self):
         draft = self.editor.state()
         entered, release, attempted, started = (threading.Event() for _ in range(4))
@@ -513,6 +552,24 @@ class ConfigUITests(unittest.TestCase):
         thread.start()
         base = f'http://127.0.0.1:{server.server_port}'
         try:
+            with urllib.request.urlopen(base + '/icon.png') as response:
+                self.assertEqual(response.headers['Content-Type'], 'image/png')
+                self.assertEqual(response.read(), (Path(ui.__file__).parent.parent / 'docs/assets/dcc-icon-pink.png').read_bytes())
+            with urllib.request.urlopen(base + '/getting-started.md') as response:
+                self.assertEqual(response.headers['Content-Type'], 'text/plain; charset=utf-8')
+                self.assertEqual(response.read(), (Path(ui.__file__).parent.parent / 'getting-started.md').read_bytes())
+            request = urllib.request.Request(base + '/getting-started.md', headers={'Host': 'evil.invalid'})
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request)
+            self.assertEqual(error.exception.code, 403)
+            request = urllib.request.Request(base + '/icon.png', headers={'Host': 'evil.invalid'})
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request)
+            self.assertEqual(error.exception.code, 403)
+            request = urllib.request.Request(base + '/docs/assets/dcc-icon-pink.png', headers={'X-DCC-Token': token})
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request)
+            self.assertEqual(error.exception.code, 404)
             with self.assertRaises(urllib.error.HTTPError) as error:
                 urllib.request.urlopen(base + '/api/state')
             self.assertEqual(error.exception.code, 403)
@@ -539,7 +596,9 @@ class ConfigUITests(unittest.TestCase):
             with urllib.request.urlopen(request) as response:
                 self.assertEqual(json.load(response)['api_key'], 'secret-one')
             with urllib.request.urlopen(base + '/') as response:
-                self.assertIn('保存并重载', response.read().decode())
+                page = response.read().decode()
+                self.assertIn('保存并重载', page)
+                self.assertIn('href="/getting-started.md" target="_blank"', page)
                 self.assertIn('用量看板', (Path(ui.__file__).with_name('ui.html')).read_text())
         finally:
             server.shutdown()

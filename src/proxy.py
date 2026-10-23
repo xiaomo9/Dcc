@@ -234,7 +234,7 @@ def _pid_alive(pid: int) -> bool:
 def status(cfg: DccConfig) -> dict:
     pid = read_pid(cfg.proxy_pidfile)
     port_open = is_port_open(cfg.port)
-    healthy = _health_ok(cfg.port) if port_open else False
+    healthy = _is_dcc_proxy(cfg.port, for_vscode=True) if port_open else False
     return {
         "pid": pid,
         "port": cfg.port,

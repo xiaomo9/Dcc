@@ -525,6 +525,8 @@ class ConfigEditor:
 def create_server(editor: ConfigEditor, token: str | None = None) -> tuple[http.server.ThreadingHTTPServer, str]:
     token = token or secrets.token_urlsafe(32)
     page = (Path(__file__).parent / "ui.html").read_bytes()
+    icon = (Path(__file__).parent.parent / "docs/assets/dcc-icon-pink.png").read_bytes()
+    guide = (Path(__file__).parent.parent / "getting-started.md").read_bytes()
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args) -> None:
@@ -551,8 +553,13 @@ def create_server(editor: ConfigEditor, token: str | None = None) -> tuple[http.
             self._send(status, json.dumps(data, ensure_ascii=False).encode())
 
         def do_GET(self) -> None:
-            if self.path == "/" and self.headers.get("Host") == f"127.0.0.1:{self.server.server_port}":
-                self._send(200, page, "text/html; charset=utf-8")
+            if self.path in ("/", "/icon.png", "/getting-started.md") and self.headers.get("Host") == f"127.0.0.1:{self.server.server_port}":
+                if self.path == "/icon.png":
+                    self._send(200, icon, "image/png")
+                elif self.path == "/getting-started.md":
+                    self._send(200, guide, "text/plain; charset=utf-8")
+                else:
+                    self._send(200, page, "text/html; charset=utf-8")
                 return
             if not self._authorized():
                 self._json(403, {"error": "访问被拒绝"})
