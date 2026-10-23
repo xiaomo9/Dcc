@@ -526,7 +526,10 @@ def create_server(editor: ConfigEditor, token: str | None = None) -> tuple[http.
     token = token or secrets.token_urlsafe(32)
     page = (Path(__file__).parent / "ui.html").read_bytes()
     icon = (Path(__file__).parent.parent / "docs/assets/dcc-icon-pink.png").read_bytes()
-    guide = (Path(__file__).parent.parent / "getting-started.md").read_bytes()
+    guide = (Path(__file__).parent / "guide_intro.html").read_bytes()
+    advanced_guide = (Path(__file__).parent / "guide.html").read_bytes()
+    docs = {path: (Path(__file__).parent.parent / path.lstrip("/")).read_bytes() for path in (
+        "/getting-started.md", "/dcc.md", "/docs/design.md", "/docs/known-issues.md")}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args) -> None:
@@ -553,11 +556,15 @@ def create_server(editor: ConfigEditor, token: str | None = None) -> tuple[http.
             self._send(status, json.dumps(data, ensure_ascii=False).encode())
 
         def do_GET(self) -> None:
-            if self.path in ("/", "/icon.png", "/getting-started.md") and self.headers.get("Host") == f"127.0.0.1:{self.server.server_port}":
-                if self.path == "/icon.png":
+            path = urllib.parse.urlsplit(self.path).path
+            if path in ("/", "/icon.png", "/guide", *docs) and self.headers.get("Host") == f"127.0.0.1:{self.server.server_port}":
+                if path == "/icon.png":
                     self._send(200, icon, "image/png")
-                elif self.path == "/getting-started.md":
-                    self._send(200, guide, "text/plain; charset=utf-8")
+                elif path == "/guide":
+                    self._send(200, advanced_guide if urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("doc") else guide,
+                               "text/html; charset=utf-8")
+                elif path in docs:
+                    self._send(200, docs[path], "text/plain; charset=utf-8")
                 else:
                     self._send(200, page, "text/html; charset=utf-8")
                 return

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第一次使用 · dcc</title>
+<link rel="icon" type="image/png" href="/icon.png">
+<style>
+:root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; color: #0f172a; background: #f8fafc; --blue: #2563eb; --muted: #64748b; --border: #e2e8f0 }
+* { box-sizing: border-box }
+body { margin: 0; min-width: 320px }
+a { color: var(--blue); text-decoration: none }
+a:hover { text-decoration: underline }
+.topbar { background: #fff; border-bottom: 1px solid var(--border) }
+.topbar-inner { max-width: 980px; height: 62px; margin: auto; padding: 0 28px; display: flex; align-items: center; gap: 12px }
+.topbar img { width: 32px; height: 32px }
+.brand { font-weight: 700 }
+.divider { width: 1px; height: 18px; background: var(--border) }
+.topbar-label { color: var(--muted); font-size: 13px }
+main { max-width: 980px; margin: auto; padding: 54px 28px 80px }
+.eyebrow { margin: 0 0 10px; color: var(--blue); font-size: 11px; font-weight: 750; letter-spacing: .13em }
+h1 { margin: 0; font-size: clamp(28px,4vw,38px); line-height: 1.25; letter-spacing: -.035em }
+.lead { max-width: 640px; margin: 14px 0 0; color: var(--muted); font-size: 15px; line-height: 1.7 }
+.prepare { display: flex; align-items: flex-start; gap: 13px; margin: 30px 0 34px; padding: 17px 20px; border: 1px solid #bfdbfe; border-radius: 11px; background: #eff6ff }
+.prepare-icon { display: grid; place-items: center; width: 25px; height: 25px; flex: none; border-radius: 7px; background: #dbeafe; color: #1d4ed8; font-size: 14px; font-weight: 750 }
+.prepare strong { display: block; margin-bottom: 4px; font-size: 14px }
+.prepare p { margin: 0; color: #475569; font-size: 13px; line-height: 1.7 }
+.steps { display: grid; gap: 14px }
+.step { display: grid; grid-template-columns: 38px minmax(0,1fr); gap: 18px; padding: 23px 25px; border: 1px solid var(--border); border-radius: 13px; background: #fff; box-shadow: 0 1px 3px rgba(15,23,42,.025) }
+.number { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: #eff6ff; color: #1d4ed8; font-size: 15px; font-weight: 750 }
+.step h2 { margin: 2px 0 9px; font-size: 17px; letter-spacing: -.02em }
+.step p { margin: 0; color: #475569; font-size: 13px; line-height: 1.75 }
+.step p + p { margin-top: 8px }
+.path { display: inline-flex; align-items: center; gap: 7px; margin: 0 0 9px; color: var(--blue); font-size: 12px; font-weight: 700 }
+.path span { color: #94a3b8 }
+.fields { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 13px }
+.fields span { padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: #f8fafc; color: #475569; font-size: 11px }
+.note { margin-top: 12px !important; color: var(--muted) !important; font-size: 12px !important }
+.finish { margin-top: 23px; padding: 20px 23px; border: 1px solid #bbf7d0; border-radius: 11px; background: #f0fdf4 }
+.finish strong { color: #166534; font-size: 14px }
+.finish p { margin: 6px 0 0; color: #475569; font-size: 13px; line-height: 1.7 }
+.help { display: flex; flex-wrap: wrap; gap: 10px 26px; margin-top: 34px; padding-top: 22px; border-top: 1px solid var(--border) }
+.help h2 { width: 100%; margin: 0 0 2px; font-size: 15px }
+.help p { flex: 1 1 260px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7 }
+.advanced { display: inline-flex; margin-top: 25px; font-size: 12px; font-weight: 650 }
+@media (max-width: 600px) { .topbar-inner { height: 56px; padding: 0 16px } main { padding: 32px 16px 56px } .prepare { margin: 24px 0; padding: 15px } .step { grid-template-columns: 30px minmax(0,1fr); gap: 12px; padding: 18px 16px } .number { width: 30px; height: 30px } }
+</style>
+</head>
+<body>
+<header class="topbar"><div class="topbar-inner"><img src="/icon.png" alt=""><span class="brand">dcc</span><span class="divider"></span><span class="topbar-label">使用说明</span></div></header>
+<main>
+  <p class="eyebrow">QUICK START</p>
+  <h1>第一次使用，从这里开始</h1>
+  <p class="lead">保留刚才的配置面板标签页，边看边操作。完成下面三步，就能在 Claude 中选用自己的模型。</p>
+
+  <div class="prepare"><span class="prepare-icon" aria-hidden="true">✓</span><div><strong>开始前，准备一组模型连接信息</strong><p>向模型服务提供方获取：服务地址（Base URL）、模型 ID、API Key 和协议。不确定填什么时，先向提供模型的同事确认。密钥只填在面板里。</p></div></div>
+
+  <div class="steps">
+    <section class="step"><span class="number" aria-hidden="true">1</span><div><div class="path">模型入口 <span>→</span> 新增模型</div><h2>把模型加进来</h2><p>填写你准备好的连接信息。「section 名称」填一个自己认得的名字，然后点「添加到草稿」。</p><div class="fields"><span>section 名称</span><span>上游模型 ID</span><span>Base URL</span><span>协议</span><span>API key</span></div><p class="note">可以先点「测试连接」确认能用；测试可能产生少量模型用量。</p></div></section>
+    <section class="step"><span class="number" aria-hidden="true">2</span><div><div class="path">槽位与切换 <span>→</span> 新增槽位</div><h2>给模型一个编号</h2><p>槽位号填一个未使用的数字，第一次可以填 <strong>1</strong>。在「模型入口」中选刚添加的模型，再点「添加到草稿」。</p></div></section>
+    <section class="step"><span class="number" aria-hidden="true">3</span><div><div class="path">页面底部 <span>→</span> 保存并重载</div><h2>保存，然后打开 Claude</h2><p>确认保存成功后，重新打开 Claude Code 会话，从模型列表选择刚才编号对应的模型。如果顶部显示代理「已停止」，先点「启动代理」。</p><p class="note">保存并重载会中断已登记的终端会话，操作前先结束进行中的工作。</p></div></section>
+  </div>
+
+  <div class="finish"><strong>已有模型配置？</strong><p>不用重复添加。代理停止时点「启动代理」；Claude 模型列表没有显示槽位时，点「同步 Claude 配置」，然后重新打开 Claude 会话。</p></div>
+
+  <div class="help"><h2>遇到问题</h2><p><strong>连接测试失败：</strong>核对地址、模型 ID、API Key、协议，并确认已连接模型服务所需网络。</p><p><strong>保存后没看到模型：</strong>确认槽位已添加；点击「同步 Claude 配置」后重新打开 Claude 会话。</p></div>
+  <a class="advanced" href="/guide?doc=start">查看完整技术说明 →</a>
+</main>
+</body>
+</html>

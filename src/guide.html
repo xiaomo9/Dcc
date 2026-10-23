@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>使用说明 · dcc</title>
+<link rel="icon" type="image/png" href="/icon.png">
+<style>
+:root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; color: #0f172a; background: #f8fafc; --border: #e2e8f0; --muted: #64748b; --blue: #2563eb }
+* { box-sizing: border-box }
+html { scroll-behavior: smooth }
+body { margin: 0; min-width: 320px }
+a { color: var(--blue); text-decoration: none }
+a:hover { text-decoration: underline }
+header { background: #fff; border-bottom: 1px solid var(--border) }
+.bar { max-width: 1240px; height: 62px; margin: auto; padding: 0 32px; display: flex; align-items: center; gap: 12px }
+.bar img { width: 32px; height: 32px }
+.brand { font-weight: 700 }
+.divider { width: 1px; height: 18px; background: var(--border) }
+.bar-label { color: var(--muted); font-size: 13px }
+.source { margin-left: auto; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; color: #475569; font-size: 12px; font-weight: 600 }
+.source:hover { background: #f8fafc; text-decoration: none }
+.shell { max-width: 1240px; margin: 0 auto; padding: 44px 32px 80px }
+.hero { padding: 0 0 34px; border-bottom: 1px solid var(--border) }
+.eyebrow { margin: 0 0 11px; color: var(--blue); font-size: 11px; font-weight: 750; letter-spacing: .14em }
+h1 { margin: 0; font-size: clamp(29px,4vw,40px); letter-spacing: -.04em; line-height: 1.2 }
+.subtitle { margin: 12px 0 0; color: var(--muted); font-size: 15px; line-height: 1.7 }
+.layout { display: grid; grid-template-columns: 220px minmax(0,1fr); gap: 50px; padding-top: 34px }
+aside { min-width: 0 }
+.toc { position: sticky; top: 28px; display: grid; gap: 3px; max-height: calc(100vh - 56px); overflow-y: auto }
+.toc-label { margin: 0 0 10px; color: #94a3b8; font-size: 11px; font-weight: 700; letter-spacing: .1em }
+.toc a { display: block; padding: 8px 10px; border-radius: 7px; color: #475569; font-size: 13px; line-height: 1.4 }
+.toc a:hover, .toc a.active { background: #eff6ff; color: #1d4ed8; text-decoration: none }
+.toc a.sub { padding-left: 23px; color: var(--muted); font-size: 12px }
+.article { min-width: 0; max-width: 850px; padding: 32px 40px 48px; background: #fff; border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 1px 3px rgba(15,23,42,.025) }
+.article h1 { font-size: 28px }
+.article h2 { margin: 42px 0 18px; padding-top: 4px; font-size: 23px; letter-spacing: -.025em }
+.article h3 { margin: 30px 0 12px; font-size: 17px }
+.article h1:first-child, .article h2:first-child { margin-top: 0 }
+.article h1, .article h2, .article h3 { scroll-margin-top: 22px }
+.article p, .article li { color: #334155; font-size: 14px; line-height: 1.85; overflow-wrap: anywhere }
+.article p { margin: 12px 0 }
+.article ul { padding-left: 22px; margin: 12px 0 20px }
+.article li + li { margin-top: 5px }
+.article strong { color: #0f172a }
+.article blockquote { margin: 18px 0; padding: 10px 18px; border-left: 3px solid #93c5fd; border-radius: 0 8px 8px 0; background: #f8fafc }
+.article blockquote p { margin: 4px 0 }
+.article hr { height: 1px; margin: 36px 0; border: 0; background: var(--border) }
+.article code { padding: 2px 5px; border-radius: 5px; background: #f1f5f9; color: #be185d; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere }
+.code-block { margin: 18px 0 22px; overflow: hidden; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc }
+.code-label { padding: 8px 16px; border-bottom: 1px solid #e2e8f0; color: var(--muted); font-size: 11px; font-weight: 650; text-transform: uppercase }
+.article pre { margin: 0; padding: 16px; overflow-x: auto; color: #1e293b; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size: 2 }
+.article pre code { padding: 0; color: inherit; background: transparent; font: inherit; white-space: pre }
+.table-wrap { max-width: 100%; margin: 18px 0 24px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px }
+.article table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.6 }
+.article th { background: #f8fafc; color: #475569; text-align: left; font-weight: 700 }
+.article th, .article td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; min-width: 76px }
+.article tr:last-child td { border-bottom: 0 }
+.article td { color: #334155 }
+.article td code { white-space: nowrap }
+.error { padding: 18px; border: 1px solid #fecaca; border-radius: 8px; background: #fef2f2; color: #b91c1c }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; gap: 22px } .toc { position: static; display: flex; gap: 6px; max-height: none; overflow-x: auto; padding-bottom: 4px } .toc-label { display: none } .toc a, .toc a.sub { flex: none; padding: 8px 10px; background: #fff; border: 1px solid var(--border) } }
+@media (max-width: 600px) { .bar { height: 56px; padding: 0 16px } .bar-label, .divider { display: none } .shell { padding: 28px 16px 56px } .hero { padding-bottom: 24px } .layout { padding-top: 20px } .article { padding: 22px 18px 32px } .article h2 { font-size: 20px } .article th, .article td { padding: 8px 10px } }
+</style>
+</head>
+<body>
+<header><div class="bar"><img src="/icon.png" alt=""><span class="brand">dcc</span><span class="divider"></span><span class="bar-label">使用说明</span><a id="source" class="source" href="/getting-started.md" target="_blank" rel="noopener noreferrer">查看 Markdown 原文</a></div></header>
+<main class="shell"><div class="hero"><p class="eyebrow">DOCUMENTATION</p><h1 id="title">使用说明</h1><p id="subtitle" class="subtitle">从安装配置到日常使用，按步骤找到需要的操作。</p></div><div class="layout"><aside><nav id="toc" class="toc" aria-label="文档目录"></nav></aside><article id="article" class="article" aria-live="polite">正在加载文档…</article></div></main>
+<script>
+const documents = {
+  start: {title:'dcc 上手指南', path:'/getting-started.md'},
+  commands: {title:'命令与配置说明', path:'/dcc.md'},
+  design: {title:'设计记录', path:'/docs/design.md'},
+  issues: {title:'已知问题', path:'/docs/known-issues.md'}
+};
+const key = new URLSearchParams(location.search).get('doc') || 'start';
+const documentInfo = documents[key] || documents.start;
+const escapeHtml = value => value.replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+const slug = value => value.toLowerCase().replace(/<[^>]*>/g,'').replace(/[^\p{L}\p{N}\s-]/gu,'').trim().replace(/\s+/g,'-');
+function linkTarget(value) {
+  if (/^https?:\/\//i.test(value)) return value;
+  const [file,hash=''] = value.split('#');
+  const paths = {'dcc.md':'commands','../dcc.md':'commands','design.md':'design','docs/design.md':'design','known-issues.md':'issues','docs/known-issues.md':'issues','getting-started.md':'start'};
+  if (!file) return '#'+hash;
+  return paths[file] ? '/guide?doc='+paths[file]+(hash?'#'+hash:'') : '';
+}
+function inline(value) {
+  const tokens = [];
+  const protect = html => {tokens.push(html); return '\u0000'+(tokens.length-1)+'\u0000';};
+  let result = escapeHtml(value).replace(/`([^`]+)`/g, (_,code) => protect('<code>'+code+'</code>'));
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_,label,url) => {
+    const target = linkTarget(url.replace(/&amp;/g,'&'));
+    return target ? protect('<a href="'+escapeHtml(target)+'">'+label+'</a>') : label;
+  });
+  result = result.replace(/https?:\/\/[^\s<]+/g, url => {
+    const match = /^(.*?)([.,;!?。，；！？)]*)$/.exec(url);
+    return protect('<a href="'+escapeHtml(match[1].replace(/&amp;/g,'&'))+'">'+match[1]+'</a>')+match[2];
+  });
+  result = result.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  return result.replace(/\u0000(\d+)\u0000/g, (_,index) => tokens[Number(index)]);
+}
+function renderMarkdown(markdown) {
+  const lines = markdown.replace(/\r\n?/g,'\n').split('\n');
+  const html = [], headings = [], ids = new Set();
+  let paragraph = [], list = [], quote = [], code = null, language = '';
+  const flushParagraph = () => {if (paragraph.length) html.push('<p>'+inline(paragraph.join(' '))+'</p>'); paragraph=[];};
+  const flushList = () => {if (list.length) html.push('<ul>'+list.map(item=>'<li>'+inline(item)+'</li>').join('')+'</ul>'); list=[];};
+  const flushQuote = () => {if (quote.length) html.push('<blockquote><p>'+quote.map(inline).join('<br>')+'</p></blockquote>'); quote=[];};
+  const flushAll = () => {flushParagraph(); flushList(); flushQuote();};
+  for (let index=0; index<lines.length; index++) {
+    const line = lines[index], trimmed = line.trim();
+    if (code !== null) {
+      if (/^```/.test(trimmed)) {html.push('<div class="code-block">'+(language?'<div class="code-label">'+escapeHtml(language)+'</div>':'')+'<pre><code>'+escapeHtml(code.join('\n'))+'</code></pre></div>'); code=null;}
+      else code.push(line);
+      continue;
+    }
+    if (/^```/.test(trimmed)) {flushAll(); code=[]; language=trimmed.slice(3).trim(); continue;}
+    if (!trimmed) {flushAll(); continue;}
+    const heading = /^(#{1,3})\s+(.+)$/.exec(trimmed);
+    if (heading) {
+      flushAll();
+      const level=heading[1].length, label=heading[2], base=slug(label); let id=base, suffix=2;
+      while (ids.has(id)) id=base+'-'+suffix++;
+      ids.add(id); headings.push({level,id,label:label.replace(/`/g,'')});
+      html.push('<h'+level+' id="'+escapeHtml(id)+'">'+inline(label)+'</h'+level+'>');
+      continue;
+    }
+    if (/^---+$/.test(trimmed)) {flushAll(); html.push('<hr>'); continue;}
+    if (trimmed.startsWith('|') && index+1<lines.length && /^\|[\s:|-]+\|?$/.test(lines[index+1].trim())) {
+      flushAll(); const rows=[trimmed]; index+=2;
+      while (index<lines.length && lines[index].trim().startsWith('|')) rows.push(lines[index++].trim());
+      index--;
+      const cells = row => row.replace(/^\||\|$/g,'').split('|').map(cell=>cell.trim());
+      const head=cells(rows.shift());
+      html.push('<div class="table-wrap"><table><thead><tr>'+head.map(cell=>'<th>'+inline(cell)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(row=>'<tr>'+cells(row).map(cell=>'<td>'+inline(cell)+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>');
+      continue;
+    }
+    if (trimmed.startsWith('>')) {flushParagraph(); flushList(); quote.push(trimmed.replace(/^>\s?/,'')); continue;}
+    if (/^[-*]\s+/.test(trimmed)) {flushParagraph(); flushQuote(); list.push(trimmed.slice(2)); continue;}
+    flushList(); flushQuote(); paragraph.push(trimmed);
+  }
+  flushAll();
+  return {html:html.join('\n'),headings};
+}
+async function load() {
+  document.title = documentInfo.title+' · dcc';
+  document.querySelector('#title').textContent = documentInfo.title;
+  document.querySelector('#source').href = documentInfo.path;
+  try {
+    const response = await fetch(documentInfo.path);
+    if (!response.ok) throw new Error('HTTP '+response.status);
+    const result = renderMarkdown(await response.text());
+    document.querySelector('#article').innerHTML = result.html;
+    document.querySelector('#toc').innerHTML = '<p class="toc-label">本页目录</p>'+result.headings.filter(item=>item.level>1).map(item=>'<a class="'+(item.level===3?'sub':'')+'" href="#'+escapeHtml(item.id)+'">'+escapeHtml(item.label)+'</a>').join('');
+    if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
+  } catch (error) { document.querySelector('#article').innerHTML = '<div class="error">文档加载失败，请重新打开配置面板后再试。</div>'; }
+}
+load();
+</script>
+</body>
+</html>

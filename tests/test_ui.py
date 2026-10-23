@@ -558,6 +558,20 @@ class ConfigUITests(unittest.TestCase):
             with urllib.request.urlopen(base + '/getting-started.md') as response:
                 self.assertEqual(response.headers['Content-Type'], 'text/plain; charset=utf-8')
                 self.assertEqual(response.read(), (Path(ui.__file__).parent.parent / 'getting-started.md').read_bytes())
+            with urllib.request.urlopen(base + '/guide') as response:
+                self.assertEqual(response.headers['Content-Type'], 'text/html; charset=utf-8')
+                guide = response.read().decode()
+                self.assertIn('第一次使用，从这里开始', guide)
+                self.assertIn('保存并重载', guide)
+                self.assertNotIn('renderMarkdown', guide)
+            with urllib.request.urlopen(base + '/guide?doc=start') as response:
+                self.assertIn('renderMarkdown', response.read().decode())
+            with urllib.request.urlopen(base + '/dcc.md') as response:
+                self.assertIn('dcc', response.read().decode())
+            request = urllib.request.Request(base + '/guide', headers={'Host': 'evil.invalid'})
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request)
+            self.assertEqual(error.exception.code, 403)
             request = urllib.request.Request(base + '/getting-started.md', headers={'Host': 'evil.invalid'})
             with self.assertRaises(urllib.error.HTTPError) as error:
                 urllib.request.urlopen(request)
@@ -598,7 +612,7 @@ class ConfigUITests(unittest.TestCase):
             with urllib.request.urlopen(base + '/') as response:
                 page = response.read().decode()
                 self.assertIn('保存并重载', page)
-                self.assertIn('href="/getting-started.md" target="_blank"', page)
+                self.assertIn('href="/guide" target="_blank"', page)
                 self.assertIn('用量看板', (Path(ui.__file__).with_name('ui.html')).read_text())
         finally:
             server.shutdown()
