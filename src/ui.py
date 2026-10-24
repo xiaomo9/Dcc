@@ -523,6 +523,8 @@ class ConfigEditor:
 
 
 def create_server(editor: ConfigEditor, token: str | None = None) -> tuple[http.server.ThreadingHTTPServer, str]:
+    from .updates import ReleaseChecker
+    updates = ReleaseChecker()
     token = token or secrets.token_urlsafe(32)
     page = (Path(__file__).parent / "ui.html").read_bytes()
     icon = (Path(__file__).parent.parent / "docs/assets/dcc-icon-pink.png").read_bytes()
@@ -572,7 +574,9 @@ def create_server(editor: ConfigEditor, token: str | None = None) -> tuple[http.
                 self._json(403, {"error": "访问被拒绝"})
                 return
             try:
-                if self.path == "/api/state":
+                if self.path == "/api/update":
+                    self._json(200, updates.check())
+                elif self.path == "/api/state":
                     self._json(200, editor.state())
                 elif self.path == "/api/runtime":
                     try:

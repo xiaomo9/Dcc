@@ -344,11 +344,24 @@ th button:hover { color: var(--blue) }
   .tabs button { font-size: 12px }
   .usage-summary { grid-template-columns: 1fr }
 }
+.update-card { padding: 18px 22px; margin-bottom: 18px }
+.update-card p, .update-card details { margin: 10px 0; font-size: 13px; line-height: 1.6 }
+.update-card pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; font: inherit }
+.update-card .runtime-actions { margin-top: 14px; flex-wrap: wrap }
+.update-help { color: var(--muted) }
+@media (max-width: 640px) { .topbar-inner { flex-wrap: wrap; height: auto; padding-top: 10px; padding-bottom: 10px } .update-card { padding: 16px } }
 </style>
 </head>
 <body>
-<header class="topbar"><div class="topbar-inner"><img class="brand-mark" src="/icon.png" width="32" height="32" alt=""><span class="brand-name">dcc</span><span class="brand-separator"></span><span class="brand-subtitle">本地模型配置</span><a class="button ghost topbar-guide" href="/guide" target="_blank" rel="noopener noreferrer">使用说明文档</a><span class="local-badge">● 仅本机访问</span></div></header>
+<header class="topbar"><div class="topbar-inner"><img class="brand-mark" src="/icon.png" width="32" height="32" alt=""><span class="brand-name">dcc</span><span class="brand-separator"></span><span class="brand-subtitle">本地模型配置</span><a class="button ghost topbar-guide" href="/guide" target="_blank" rel="noopener noreferrer">使用说明文档</a><button id="update-check" class="button ghost" type="button">检查更新</button><span class="local-badge">● 仅本机访问</span></div></header>
 <main>
+  <section id="update-card" class="surface update-card" aria-labelledby="update-title" hidden>
+    <div class="runtime-head"><h2 id="update-title">发现新版本</h2><button id="update-later" class="button ghost" type="button">稍后</button></div>
+    <p id="update-message" role="status"></p>
+    <details><summary>查看更新说明</summary><pre id="update-notes"></pre></details>
+    <div class="runtime-actions"><a id="update-download" class="button primary" target="_blank" rel="noopener noreferrer" hidden>下载安装包</a><a id="update-release" class="button ghost" target="_blank" rel="noopener noreferrer">查看发布页面</a></div>
+    <p id="update-help" class="update-help">下载后打开安装包，按提示更新。安装前请保存修改、结束工作会话，在面板停止全部并关闭 DCC；已有配置会保留。</p>
+  </section>
   <div class="page-heading"><div><p class="eyebrow">CONTROL CENTER</p><h1>配置面板</h1><p>管理模型入口、槽位路由与 Token 用量</p></div><span id="draft-pill" class="draft-pill">正在读取配置…</span></div>
   <section class="surface runtime-card" aria-labelledby="runtime-title" data-state="unknown">
     <div class="runtime-head"><h2 id="runtime-title">运行状态</h2><div class="runtime-actions runtime-secondary"><button id="runtime-refresh" class="button ghost" type="button" aria-label="刷新状态" title="重新读取代理与 CLI 实例状态">刷新状态</button><button id="sync-settings" class="button ghost" type="button" title="按已保存的槽位更新 Claude 用户设置">同步 Claude 配置</button></div></div>
@@ -1210,8 +1223,42 @@ $('#usage-models').onclick=event => {
   usageSort={key,descending:usageSort.key===key?!usageSort.descending:true};
   $('#usage-models').innerHTML=renderUsageTable(usageData.models);
 };
+async function checkUpdate(manual=false) {
+  const button = $('#update-check');
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = '检查中…';
+  try {
+    const value = await api('/api/update');
+    if (value.error) throw new Error(value.error);
+    $('#update-card').hidden = !value.available;
+    $('#update-title').textContent = value.available ? '新版本 '+value.latest : '版本更新';
+    $('#update-message').textContent = '当前版本 '+value.current+' · '+value.message;
+    $('#update-notes').textContent = value.notes || '';
+    $('#update-help').textContent = value.source_mode
+      ? '当前为源码运行。安装版使用独立配置目录，源码配置不会自动迁移。下载后请打开安装包，按提示安装。'
+      : '下载后打开安装包，按提示更新。安装前请保存修改、结束工作会话，在面板停止全部并关闭 DCC；已有配置会保留。';
+    $('#update-download').hidden = !value.download_url;
+    if (value.download_url) $('#update-download').href = value.download_url;
+    else $('#update-download').removeAttribute('href');
+    $('#update-release').href = value.release_url;
+    button.title = '当前版本 '+value.current+'；检查结果缓存 5 分钟';
+    if (manual && !value.available) toast(value.message);
+  } catch (error) {
+    $('#update-card').hidden = true;
+    button.title = error.message;
+    if (manual) toast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = '检查更新';
+  }
+}
+$('#update-check').onclick = () => checkUpdate(true);
+$('#update-later').onclick = () => { $('#update-card').hidden = true; };
+$('#update-download').onclick = () => toast('请在浏览器中查看下载进度；下载完成后打开安装包。安装前请保存修改并结束工作会话。', 'warning');
 reload();
 $('#runtime-refresh').click();
+checkUpdate();
 </script>
 </body>
 </html>

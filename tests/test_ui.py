@@ -35,6 +35,20 @@ class ConfigUITests(unittest.TestCase):
             'api_key = secret-two\nmodel = upstream-two\nprotocol = responses\n')
         self.editor = ui.ConfigEditor(self.dcc, self.settings)
 
+    def test_update_endpoint_requires_auth_and_does_not_change_configuration(self):
+        from src.updates import ReleaseChecker
+        before = (self.dcc.read_bytes(), self.llm.read_bytes())
+        with patch.object(ReleaseChecker, 'check', return_value={'available': False}) as check:
+            with self.runtime_server() as request:
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    request(headers={}, path='/api/update')
+                self.assertEqual(rejected.exception.code, 403)
+                check.assert_not_called()
+                self.assertEqual(request(path='/api/update'), {'available': False})
+                check.assert_called_once()
+        self.assertEqual(before, (self.dcc.read_bytes(), self.llm.read_bytes()))
+        self.assertFalse(self.settings.exists())
+
     def tearDown(self):
         self.tmp.cleanup()
 

@@ -40,3 +40,11 @@ Windows 需另外安装 Inno Setup 6，再运行 `ISCC /DAppVersion=<版本号> 
 5. 升级保留配置，中文和带空格的用户目录可用。
 
 Windows CI 执行新增配置测试和打包后代理冒烟测试；现有完整测试集含 POSIX 专用测试，仍在 macOS 执行。Windows 实机交互与真实模型服务验证不能以这些测试代替。
+
+## 用户检查更新
+
+面板打开时自动检查一次 GitHub Releases，右上角也可手动“检查更新”；成功结果缓存 5 分钟，不定时轮询。只有正式 Release 的数字版本高于当前 `src/VERSION` 才提示更新，草稿、预发布不推送。网络失败不会阻塞配置编辑和代理操作。
+
+发布时，标签采用 `v主版本.次版本.修订号`（例如 `v2.1.14`），并与源码 VERSION 一致。将 Actions 下载产物解压，把三个安装包分别上传到同一个正式 Release，保持文件名：`DCC-macOS-arm64.dmg`、`DCC-macOS-x64.dmg`、`DCC-Windows-x64-Setup.exe`。仅上传 Actions 压缩包不会产生安装包下载按钮。
+
+用户可查看说明、稍后处理或由浏览器下载安装包。下载本身不修改配置、不停止会话；安装前需保存修改、停止代理和会话、关闭 DCC，再运行 Windows 安装程序或替换 macOS Applications 中的 App。当前不包含静默安装、自动替换或自动重启。新版读取同一个用户数据目录。
