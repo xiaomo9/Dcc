@@ -87,3 +87,65 @@ class ReleaseTests(unittest.TestCase):
             child.terminate()
             child.wait(timeout=5)
         self.assertFalse(platform_support.pid_alive(child.pid))
+
+    def test_desktop_startup_failures_close_server_without_waiting(self):
+        from unittest.mock import MagicMock
+        from src import desktop
+        for failure in ('write', 'chmod', 'thread'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp, \
+                    patch.dict(os.environ, {'DCC_DATA_DIR': temp}):
+                path = app_paths.config_path()
+                server = MagicMock(server_port=12345)
+                tk = MagicMock()
+                target = {'write': (Path, 'write_text'), 'chmod': (Path, 'chmod'),
+                          'thread': (desktop.threading.Thread, 'start')}[failure]
+                with patch.dict('sys.modules', {'tkinter': tk}), \
+                        patch.object(desktop, 'config_path', return_value=path), \
+                        patch.object(desktop, 'create_server', return_value=(server, 'token')), \
+                        patch.object(*target, side_effect=OSError('startup failed')):
+                    self.assertEqual(desktop.run(), 1)
+                server.shutdown.assert_not_called()
+                server.server_close.assert_called_once()
+                tk.Tk.return_value.destroy.assert_called_once()
+
+    def test_desktop_closes_running_service_on_normal_exit(self):
+        from unittest.mock import MagicMock
+        from src import desktop
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'DCC_DATA_DIR': temp}):
+            app_paths.config_path()
+            server = MagicMock(server_port=12345)
+            with patch.dict('sys.modules', {'tkinter': MagicMock()}), \
+                    patch.object(desktop, 'create_server', return_value=(server, 'token')), \
+                    patch.object(desktop.threading.Thread, 'start'), \
+                    patch.object(desktop.webbrowser, 'open'):
+                self.assertEqual(desktop.run(), 0)
+            server.shutdown.assert_called_once()
+            server.server_close.assert_called_once()
+            self.assertFalse((Path(temp) / 'panel.json').exists())
+
+    def test_frozen_windows_gui_uses_console_helper_for_proxy(self):
+        from unittest.mock import MagicMock
+        from src import proxy
+        import sys
+        for frozen, system, executable in (
+                (True, 'win32', '/application/DCC.exe'),
+                (True, 'darwin', '/application/DCC'),
+                (False, sys.platform, sys.executable)):
+            with self.subTest(frozen=frozen, system=system), tempfile.TemporaryDirectory() as temp, \
+                    patch.dict(os.environ, {'DCC_DATA_DIR': temp}):
+                cfg = config.load(app_paths.config_path())
+                with patch.object(sys, 'frozen', frozen, create=True), \
+                        patch.object(sys, 'platform', system), \
+                        patch.object(sys, 'executable', executable), \
+                        patch.object(proxy, 'is_port_open', return_value=False), \
+                        patch.object(proxy, '_wait_ready', return_value=True), \
+                        patch.object(proxy.subprocess, 'Popen', return_value=MagicMock(pid=12345)) as launch:
+                    proxy.start(cfg, fixed_port=True)
+                args = launch.call_args.args[0]
+                if frozen:
+                    expected = str(Path(executable).with_name('dcc-cli.exe')) if system == 'win32' else executable
+                    self.assertEqual(args, [expected, '--serve-proxy', str(cfg.proxy_config_path)])
+                else:
+                    self.assertEqual(args, [executable, str(Path(proxy.__file__).parent / 'proxy_server.py'), str(cfg.proxy_config_path)])
+                self.assertEqual(launch.call_args.kwargs['stdout'].name, str(cfg.proxy_log))
+                self.assertIs(launch.call_args.kwargs['stdout'], launch.call_args.kwargs['stderr'])

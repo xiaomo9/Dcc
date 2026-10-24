@@ -112,29 +112,64 @@ def _start_locked(cfg: DccConfig, *, fixed_port: bool = False) -> int:
 
     server_py = Path(__file__).parent / "proxy_server.py"
     _trim_proxy_log(cfg.proxy_log)
-    logf = cfg.proxy_log.open("ab")
-    cmd = ([sys.executable, "--serve-proxy", str(cfg.proxy_config_path)]
-           if getattr(sys, "frozen", False) else
-           [sys.executable, str(server_py), str(cfg.proxy_config_path)])
+    if getattr(sys, "frozen", False):
+        executable = (str(Path(sys.executable).with_name("dcc-cli.exe"))
+                      if sys.platform == "win32" else sys.executable)
+        cmd = [executable, "--serve-proxy", str(cfg.proxy_config_path)]
+    else:
+        cmd = [sys.executable, str(server_py), str(cfg.proxy_config_path)]
     L.log(f"启动 dcc-proxy: {' '.join(cmd)}")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=logf,
-        stderr=logf,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-    )
-    cfg.proxy_pidfile.write_text(str(proc.pid))
-    L.log(f"proxy 主进程 pid={proc.pid},等待端口就绪…")
+    with cfg.proxy_log.open("ab") as logf:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=logf,
+            stderr=logf,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    try:
+        cfg.proxy_pidfile.write_text(str(proc.pid))
+        L.log(f"proxy 主进程 pid={proc.pid},等待端口就绪…")
 
-    if not _wait_ready(cfg):
-        L.log("[ERROR] proxy 未在 ready_timeout 内就绪,查看 log:", level="ERROR")
-        L.log(f"  tail -f {cfg.proxy_log}")
-        raise SystemExit(4)
+        if not _wait_ready(cfg):
+            L.log("[ERROR] proxy 未在 ready_timeout 内就绪,查看 log:", level="ERROR")
+            L.log(f"  tail -f {cfg.proxy_log}")
+            raise SystemExit(4)
 
-    L.log(f"proxy 就绪 · pid={proc.pid} · port={cfg.port}")
-    return proc.pid
+        L.log(f"proxy 就绪 · pid={proc.pid} · port={cfg.port}")
+        return proc.pid
+    except BaseException:
+        _cleanup_failed_start(cfg, proc)
+        raise
+
+
+def _cleanup_failed_start(cfg: DccConfig, proc: subprocess.Popen) -> None:
+    """只回收本次 Popen 创建的进程，清理失败不覆盖原始启动错误。"""
+    try:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        L.log(f"[WARN] 本次启动的代理 pid={proc.pid} 未能确认退出，保留 PID 文件供后续处理", level="WARN")
+        return
+    try:
+        if cfg.proxy_pidfile.read_bytes().strip() == str(proc.pid).encode():
+            cfg.proxy_pidfile.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        L.log("[WARN] 本次代理已退出，但 PID 文件清理失败，请检查文件权限", level="WARN")
 
 
 def _warn_config_change(cfg: DccConfig) -> None:

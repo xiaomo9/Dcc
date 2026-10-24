@@ -47,9 +47,14 @@ class VSCodeTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def cli(self, *args):
-        return subprocess.run([sys.executable, '-m', 'src.dcc', *args],
-                              cwd=self.root, env=self.env, capture_output=True,
-                              text=True, timeout=15)
+        try:
+            return subprocess.run([sys.executable, '-m', 'src.dcc', *args],
+                                  cwd=self.root, env=self.env, capture_output=True,
+                                  text=True, timeout=15)
+        except subprocess.TimeoutExpired as error:
+            log = self.root / 'output/dcc-proxy.log'
+            detail = log.read_text(encoding='utf-8', errors='replace')[-16000:] if log.exists() else '(no proxy log)'
+            self.fail(f'CLI {args} timed out; stderr={error.stderr!r}\nProxy log:\n{detail}')
 
     def test_proxy_start_reuses_same_process_without_starting_claude(self):
         result = self.cli('start')
@@ -59,6 +64,38 @@ class VSCodeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / 'output/dcc-proxy.pid').read_text(), pid)
         self.assertFalse((self.root / 'output/instances.json').exists())
+
+    def test_start_timeout_cleans_real_proxy_and_can_retry(self):
+        ini = self.root / 'dcc.ini'
+        original = ini.read_text()
+        ini.write_text(original.replace('[proxy]\n', '[proxy]\nready_timeout=0\n'))
+        result = self.cli('start')
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertFalse((self.root / 'output/dcc-proxy.pid').exists())
+        with self.assertRaises(OSError):
+            socket.create_connection(('127.0.0.1', self.port), timeout=1)
+        ini.write_text(original)
+        result = self.cli('start')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / 'output/dcc-proxy.pid').exists())
+        self.assertEqual(self.cli('stop').returncode, 0)
+
+    def test_proxy_start_does_not_depend_on_hostname_dns(self):
+        (self.root / 'sitecustomize.py').write_text(
+            'import socket\n'
+            'original = socket.getfqdn\n'
+            'def lookup(host=""):\n'
+            '    if host == "0.0.0.0":\n'
+            '        raise RuntimeError("runner hostname DNS unavailable")\n'
+            '    return original(host)\n'
+            'socket.getfqdn = lookup\n')
+        ini = self.root / 'dcc.ini'
+        ini.write_text(ini.read_text().replace('[proxy]\n', '[proxy]\nready_timeout=2\n'))
+        result = self.cli('start')
+        log = self.root / 'output/dcc-proxy.log'
+        details = result.stderr + (log.read_text(encoding='utf-8') if log.exists() else '')
+        self.assertEqual(result.returncode, 0, details)
+        self.assertEqual(self.cli('stop').returncode, 0)
 
     def test_start_and_stop_wait_for_lifecycle_lock(self):
         output = self.root / 'output'

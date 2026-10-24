@@ -18,6 +18,7 @@ def run():
     window = tk.Tk()
     window.withdraw()
     server = None
+    server_started = False
     state = data_dir() / "panel.json"
     try:
         path = config_path()
@@ -44,6 +45,7 @@ def run():
                                              "token": token}), encoding="utf-8")
                 state.chmod(0o600)
                 threading.Thread(target=server.serve_forever, daemon=True).start()
+                server_started = True
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
         url = f"http://127.0.0.1:{server.server_port}/#token={token}"
@@ -62,15 +64,19 @@ def run():
         return 1
     finally:
         if server is not None:
-            server.shutdown()
+            if server_started:
+                server.shutdown()
             server.server_close()
-            with (data_dir() / "panel.lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                try:
-                    if state.exists() and json.loads(state.read_text(encoding="utf-8")).get("pid") == os.getpid():
-                        state.unlink()
-                finally:
-                    fcntl.flock(lock, fcntl.LOCK_UN)
+            try:
+                with (data_dir() / "panel.lock").open("a") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    try:
+                        if state.exists() and json.loads(state.read_text(encoding="utf-8")).get("pid") == os.getpid():
+                            state.unlink()
+                    finally:
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+            except (OSError, ValueError, AttributeError):
+                pass  # 状态写入失败时仍须完成退出，下次启动会忽略损坏状态。
         try:
             window.destroy()
         except tk.TclError:

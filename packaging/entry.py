@@ -9,6 +9,9 @@ def main():
     for name in ("stdout", "stderr"):
         if getattr(sys, name) is None:
             setattr(sys, name, open(os.devnull, "w"))
+        stream = getattr(sys, name)
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     if sys.argv[1:2] == ["--serve-proxy"]:
         sys.argv.pop(1)
         from src.proxy_server import main as serve

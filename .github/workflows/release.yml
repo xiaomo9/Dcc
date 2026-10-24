@@ -38,6 +38,9 @@ jobs:
       - name: Test release configuration on Windows
         if: runner.os == 'Windows'
         run: python -m unittest discover -s tests -p test_release.py
+      - name: Test Unicode startup logs on Windows
+        if: runner.os == 'Windows'
+        run: python -m unittest discover -s tests -p test_packaged_stdio.py
       - name: Verify build architecture
         run: python -c "import platform; assert platform.machine().lower() in ({'arm64':'arm64','x64':'x86_64'}['${{ matrix.arch }}'], 'amd64' if '${{ matrix.arch }}' == 'x64' else 'arm64')"
       - run: python packaging/build.py

@@ -2244,6 +2244,11 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def server_bind(self) -> None:
+        # 代理仅使用绑定地址，避免 HTTPServer 的主机名解析阻塞启动。
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 
 def _cleanup_dumps_old(dumps_dir: Path, days: int) -> None:
     """清 dumps/ 下超过 N 天的 req_YYYYMMDD_*.json 文件。
@@ -2272,6 +2277,10 @@ def _cleanup_dumps_old(dumps_dir: Path, days: int) -> None:
 
 
 def main() -> None:
+    # Windows 重定向到日志文件时可能使用系统代码页，启动日志含中文。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     if len(sys.argv) < 2:
         print("usage: proxy_server.py <config.json>", file=sys.stderr)
         sys.exit(2)

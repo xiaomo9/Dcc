@@ -257,6 +257,7 @@ th button:hover { color: var(--blue) }
 .toolbar-status.success { color: var(--green) }
 .toolbar-status.success .status-dot { background: #22c55e }
 .toolbar-actions { display: flex; gap: 8px }
+.feedback-note { margin-top: 20px; color: var(--muted); font-size: 12px; line-height: 1.7; text-align: center; overflow-wrap: anywhere }
 .toast { position: fixed; z-index: 35; top: 78px; right: 24px; max-width: min(410px,calc(100vw - 32px)); display: flex; align-items: start; gap: 10px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: #fff; box-shadow: var(--shadow); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere }
 .toast.success { border-color: #bbf7d0; color: var(--green) }
 .toast.error { border-color: #fecaca; color: var(--red) }
@@ -410,6 +411,7 @@ th button:hover { color: var(--blue) }
     <section class="surface"><div class="section-head"><div><h2>详细数据</h2><p>按实际调用的上游模型汇总。</p></div></div><div id="usage-models" class="usage-table-wrap"></div></section>
   </div>
   <div id="config-toolbar" class="toolbar"><div id="toolbar-status" class="toolbar-status"><span class="status-dot"></span><span id="message">正在读取配置…</span></div><div class="toolbar-actions"><button id="reload" class="button" type="button">重新读取</button><button id="save" class="button primary" type="button" disabled>保存并重载</button></div></div>
+  <footer class="feedback-note">有新诉求或问题反馈，请联系 陈傲(chenao.67)</footer>
 </main>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <div id="drawer-overlay" class="overlay" hidden></div>
