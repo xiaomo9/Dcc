@@ -60,6 +60,9 @@ jobs:
           $version = (Get-Content src/VERSION).Trim()
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging/windows.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test Windows installer command and user Path
+        if: runner.os == 'Windows'
+        run: python packaging/windows_smoke.py
       - name: Write SHA256 checksums
         shell: python
         run: |

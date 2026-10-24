@@ -128,7 +128,8 @@ class ReleaseTests(unittest.TestCase):
         from src import proxy
         import sys
         for frozen, system, executable in (
-                (True, 'win32', '/application/DCC.exe'),
+                (True, 'win32', '/application/DCC-panel.exe'),
+                (True, 'win32', '/application/dcc.exe'),
                 (True, 'darwin', '/application/DCC'),
                 (False, sys.platform, sys.executable)):
             with self.subTest(frozen=frozen, system=system), tempfile.TemporaryDirectory() as temp, \
@@ -143,7 +144,7 @@ class ReleaseTests(unittest.TestCase):
                     proxy.start(cfg, fixed_port=True)
                 args = launch.call_args.args[0]
                 if frozen:
-                    expected = str(Path(executable).with_name('dcc-cli.exe')) if system == 'win32' else executable
+                    expected = str(Path(executable).with_name('dcc.exe')) if system == 'win32' else executable
                     self.assertEqual(args, [expected, '--serve-proxy', str(cfg.proxy_config_path)])
                 else:
                     self.assertEqual(args, [executable, str(Path(proxy.__file__).parent / 'proxy_server.py'), str(cfg.proxy_config_path)])

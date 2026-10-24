@@ -13,9 +13,11 @@ python packaging/build.py
 python packaging/smoke.py
 ```
 
-macOS 输出 `dist/DCC.app`；Windows 输出 `dist/DCC/DCC.exe`。双击打开启动窗口和浏览器面板，再次打开会复用面板。关闭启动窗口会关闭面板；代理继续运行，关闭前可在面板点击“停止全部”。
+macOS 输出 `dist/DCC.app`；Windows 输出 `dist/DCC/DCC-panel.exe`。双击打开启动窗口和浏览器面板，再次打开会复用面板。关闭启动窗口会关闭面板；代理继续运行，关闭前可在面板点击“停止全部”。
 
-命令行入口是同目录中的 `dcc-cli`（Windows 为 `dcc-cli.exe`），支持原有命令。安装程序不修改 shell 配置或 PATH。macOS App 内的入口位于 `DCC.app/Contents/MacOS/dcc-cli`。
+Windows 命令行入口为安装目录中的 `dcc.exe`。安装或升级时可勾选「将 dcc 添加到当前用户 Path」，每次默认不勾选；选中后才添加目录，重新打开终端即可使用 `dcc 2`、`dcc status` 等原有命令。未勾选或添加失败时，完成页会提示用户手动加入 Path，并显示实际安装目录；图形面板仍可正常使用。取消勾选不会移除已存在的 Path 项。桌面和开始菜单快捷方式仍名为 DCC，打开图形面板。升级会移除旧的 `dcc-cli.exe`，卸载仅移除由安装程序添加的 Path 项，保留其他路径及用户自行添加的项。
+
+macOS 命令行入口仍位于 `DCC.app/Contents/MacOS/dcc-cli`，不修改 shell 配置或 PATH。
 
 Windows 需另外安装 Inno Setup 6，再运行 `ISCC /DAppVersion=<版本号> packaging/windows.iss` 生成安装程序。macOS DMG 生成步骤见 `.github/workflows/release.yml`。
 
@@ -39,7 +41,7 @@ Windows 需另外安装 Inno Setup 6，再运行 `ISCC /DAppVersion=<版本号> 
 4. 多个真实 Claude Code 会话登记和停止，不能停止其他工作会话。
 5. 升级保留配置，中文和带空格的用户目录可用。
 
-Windows CI 执行新增配置测试和打包后代理冒烟测试；现有完整测试集含 POSIX 专用测试，仍在 macOS 执行。Windows 实机交互与真实模型服务验证不能以这些测试代替。
+Windows CI 执行新增配置测试、打包后代理冒烟测试，以及安装程序的命令发现、重复升级、Path 保留与卸载清理验证；现有完整测试集含 POSIX 专用测试，仍在 macOS 执行。Windows 实机交互与真实模型服务验证不能以这些测试代替。
 
 ## 用户检查更新
 

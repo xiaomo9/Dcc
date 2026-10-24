@@ -12,11 +12,11 @@ for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding='utf-8', errors='backslashreplace')
 
 root = Path(__file__).resolve().parents[1]
-exe = root / 'dist/DCC' / ('dcc-cli.exe' if sys.platform == 'win32' else 'dcc-cli')
+exe = root / 'dist/DCC' / ('dcc.exe' if sys.platform == 'win32' else 'dcc-cli')
 with tempfile.TemporaryDirectory(prefix='dcc-release-') as temporary:
     env = dict(os.environ, DCC_DATA_DIR=temporary)
     def run(*args, desktop=False):
-        program = exe.with_name('DCC.exe' if sys.platform == 'win32' else 'DCC') if desktop else exe
+        program = exe.with_name('DCC-panel.exe' if sys.platform == 'win32' else 'DCC') if desktop else exe
         try:
             return subprocess.run([str(program), *args], env=env, capture_output=True,
                                   text=True, encoding='utf-8', errors='replace', timeout=45, check=True)
