@@ -124,6 +124,28 @@ class TelemetryTests(unittest.TestCase):
             track(None)
         self.assertEqual(len(self.events()), 200)
 
+    def test_writer_waits_for_short_lived_database_lock(self):
+        self.usage.track('dcc_launch', slot='1')
+        connecting = threading.Event()
+        connect = sqlite3.connect
+
+        def observed_connect(*args, **kwargs):
+            connecting.set()
+            return connect(*args, **kwargs)
+
+        with connect(self.usage.path) as blocker:
+            blocker.execute('BEGIN IMMEDIATE')
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                with patch('telemetry.sqlite3.connect', side_effect=observed_connect):
+                    future = pool.submit(self.usage.track, 'dcc_launch', slot='1')
+                    try:
+                        self.assertTrue(connecting.wait(2))
+                        time.sleep(0.25)
+                    finally:
+                        blocker.commit()
+                    future.result(timeout=2)
+        self.assertEqual(len(self.events()), 2)
+
     def test_failover_and_terminal_error(self):
         metric = RequestMetrics(self.usage)
         metric.observe('cc_in', {'req_id': 'id', 'protocol': 'openai', 'slot': '1'})
