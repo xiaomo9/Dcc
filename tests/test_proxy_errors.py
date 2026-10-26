@@ -24,6 +24,7 @@ class Upstream(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        type(self).last_body = body
         type(self).calls += 1
         type(self).models.append(body['model'])
         outcome = 'success' if body['model'] == 'other' else self.outcome
@@ -158,6 +159,47 @@ class ProxyErrorTests(unittest.TestCase):
         self.assertNotIn('[dcc-proxy]', text)
         if partial:
             self.assertLessEqual(text.count('partial text'), 1)
+
+    def test_image_capability_guard(self):
+        image = {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'test'}}
+        for protocol in ('openai', 'responses', 'anthropic'):
+            for stream in (False, True):
+                for content in ([image], [{'type': 'image_url', 'image_url': {'url': 'https://invalid.invalid/a.png'}}],
+                                [{'type': 'tool_result', 'tool_use_id': 'call_test', 'content': [image]}]):
+                    for scenario in ('new', 'history', 'supported'):
+                        with self.subTest(protocol=protocol, stream=stream, content=content, scenario=scenario):
+                            self.configure(protocol)
+                            Upstream.outcome = 'success'
+                            proxy.CONFIG.models_by_name['mock']['supports_images'] = scenario == 'supported'
+                            messages = [{'role': 'user', 'content': content}]
+                            if scenario == 'history':
+                                messages += [{'role': 'assistant', 'content': 'previous answer'},
+                                             {'role': 'user', 'content': 'continue'}]
+                            response = self.client.post(
+                                f'http://127.0.0.1:{self.server.server_port}/v1/messages',
+                                json={'model': 'mock', 'stream': stream, 'messages': messages}, timeout=5)
+                            if scenario == 'new':
+                                self.assertEqual(response.status_code, 400)
+                                self.assertEqual(response.json()['error']['type'], 'invalid_request_error')
+                                self.assertIn('请切换到支持图片的模型', response.json()['error']['message'])
+                                self.assertEqual(Upstream.calls, 0)
+                            else:
+                                self.assertEqual(response.status_code, 200)
+                                self.assertEqual(Upstream.calls, 1)
+                                if scenario == 'history':
+                                    self.assertEqual(response.headers['x-dcc-warn-images-stripped'], '1')
+                                    payload = json.dumps(Upstream.last_body)
+                                    self.assertNotIn('"type": "image"', payload)
+                                    self.assertNotIn('"type": "image_url"', payload)
+                                    self.assertNotIn('"type": "input_image"', payload)
+                                elif protocol == 'anthropic':
+                                    self.assertEqual(Upstream.last_body['messages'], messages)
+                                if stream:
+                                    text = ''.join(event.get('delta', {}).get('text', '')
+                                                   for _, event in proxy._parse_sse_events(response.content))
+                                else:
+                                    text = ''.join(block.get('text', '') for block in response.json()['content'])
+                                self.assertEqual(text, 'partial text')
 
     def test_http_and_stream_failures(self):
         outcomes = {'bad_request': 400, 'limited': 429, 'empty': 502, 'truncated': 502,

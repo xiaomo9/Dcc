@@ -11,7 +11,7 @@ import proxy_server as proxy
 
 
 class OpenAIStreamTests(unittest.TestCase):
-    def convert(self, pieces, *, mode='hide', tool=True):
+    def convert(self, pieces, *, mode='hide', tool=True, interrupted_delta=None):
         chunks = [{'choices': [{'delta': {'content': piece}}]} for piece in pieces]
         if tool:
             chunks.append({'choices': [{'delta': {'tool_calls': [{
@@ -25,14 +25,26 @@ class OpenAIStreamTests(unittest.TestCase):
         response.iter_lines.return_value = iter(
             ['data: ' + json.dumps(chunk) for chunk in chunks] + ['data: [DONE]']
         )
+        responses = [response]
+        if interrupted_delta is not None:
+            def interrupted_stream():
+                yield 'data: ' + json.dumps({'choices': [{'delta': interrupted_delta}]})
+                raise proxy.requests.ReadTimeout('interrupted before visible output')
+
+            interrupted = MagicMock()
+            interrupted.__enter__.return_value = interrupted
+            interrupted.status_code = 200
+            interrupted.iter_lines.return_value = interrupted_stream()
+            responses.insert(0, interrupted)
         handler = SimpleNamespace(wfile=io.BytesIO())
         model = {'upstream_id': 'test', 'base_url': 'https://invalid.invalid', 'api_key': 'test'}
         config = SimpleNamespace(soft_timeout=10, max_candidates=1)
         with patch.object(proxy, 'CONFIG', config, create=True), \
                 patch.object(proxy, '_reasoning_mode', return_value=mode), \
                 patch.object(proxy, '_log'), patch.object(proxy, '_tl'), \
-                patch.object(proxy.requests, 'post', return_value=response):
+                patch.object(proxy.requests, 'post', side_effect=responses) as post:
             proxy.stream_openai_to_anthropic(handler, 'test', model, [], {}, {})
+        self.assertEqual(post.call_count, len(responses))
         return [json.loads(line[6:]) for line in handler.wfile.getvalue().decode().splitlines()
                 if line.startswith('data: ')]
 
@@ -95,6 +107,31 @@ class OpenAIStreamTests(unittest.TestCase):
                 events = self.convert(['<thi', 'nk>internal reasoning</thi', 'nk>好了'], mode=mode)
                 self.assert_valid_blocks(events)
                 self.assertEqual(self.text(events), '好了')
+
+    def test_retry_discards_buffered_text_and_partial_thinking_tags(self):
+        for mode in ('hide', 'thinking'):
+            for first_piece in ('OLD', '<thi', '<think>'):
+                with self.subTest(mode=mode, first_piece=first_piece):
+                    events = self.convert(['NEW answer'], mode=mode, tool=False,
+                                          interrupted_delta={'content': first_piece})
+                    self.assert_valid_blocks(events)
+                    self.assertEqual(self.text(events), 'NEW answer')
+                    self.assertFalse(any(event.get('delta', {}).get('type') == 'thinking_delta'
+                                         for event in events))
+
+    def test_retry_discards_hidden_thinking_state(self):
+        events = self.convert(['NEW answer'], tool=False,
+                              interrupted_delta={'content': '<think>internal reasoning'})
+        self.assert_valid_blocks(events)
+        self.assertEqual(self.text(events), 'NEW answer')
+
+    def test_retry_discards_unstarted_tool_call(self):
+        events = self.convert([], interrupted_delta={'tool_calls': [
+            {'index': 0, 'id': 'call_old', 'type': 'function', 'function': {}}]})
+        self.assert_valid_blocks(events)
+        tools = [event['content_block'] for event in events
+                 if event['type'] == 'content_block_start']
+        self.assertEqual([tool['id'] for tool in tools], ['call_test'])
 
 
 if __name__ == '__main__':

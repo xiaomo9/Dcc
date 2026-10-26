@@ -86,4 +86,4 @@ rag 系(slot 6-8)从 openai/responses 协议改走 **anthropic 原生 `/v1/messa
 
 ### 2026-08-19(v0.1.16)· 图文能力守卫
 
-`~/.dm/llm.ini` 每 section 支持 `supports_images = true|false`(缺省 false 保守)· `false` 时 proxy 层剥掉历史 `image`/`image_url` block(避免 GLM/DeepSeek 等纯文本模型收到图片直接 400)· 剥离后:openai/responses 分支 SSE 首帧插入 `[dcc] ⚠️ 本 slot 不支持图文 · 已剥离 N 张历史图片…` 明文提示,anthropic 分支通过响应头 `x-dcc-warn-images-stripped: N` + proxy log WARN 提示。要开图文能力的 slot,在对应 llm.ini section 加 `supports_images = true`(先确认模型确实支持 vision)。
+`~/.dm/llm.ini` 每 section 支持 `supports_images = true|false`(缺省 false 保守)。`false` 时，若请求末尾 user 消息包含新图片（包括工具返回的图片），三种协议均在调用上游前返回 HTTP 400 `invalid_request_error`，提示切换到支持图片的模型后重试。历史 `image`/`image_url` block 仍会过滤，避免纯文本模型拒绝请求；只通过响应头 `x-dcc-warn-images-stripped: N` 和 proxy log WARN 记录，不再向 assistant 回答注入警告。`true` 时保留图片；仅在确认模型支持图文输入后开启。

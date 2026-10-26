@@ -942,28 +942,6 @@ def emit_error(msg: str) -> bytes:
     return sse_event("error", {"type": "error", "error": {"type": "api_error", "message": msg}})
 
 
-def _write_stripped_images_warning(handler: "ProxyHandler") -> bool:
-    """如果本请求 dcc 剥了图 · 在 assistant 首帧前打开 text block 并写一段明文提示。
-
-    返回 True = 已开 block(且写了 warning delta · 调用方跳过自己的 content_block_start(0));
-    False = 无剥图 · 调用方正常开 block。
-    """
-    n = getattr(handler, "_dcc_stripped_imgs", 0) or 0
-    if n <= 0:
-        return False
-    slot = getattr(handler, "_dcc_slot", "?")
-    upstream = getattr(handler, "_dcc_upstream", "?")
-    msg = (
-        f"[dcc] ⚠️ 本 slot(slot={slot} · {upstream})不支持图文输入 · "
-        f"已剥离 {n} 张历史图片 · 后续回答将忽略图片内容。\n"
-        f"如需图文能力 · 换用 vision-capable slot 或在 ~/.dm/llm.ini 对应 section 设 `supports_images = true`(先确认模型确实支持)。\n\n"
-    )
-    handler.wfile.write(emit_content_block_start(0))
-    handler.wfile.write(emit_content_delta(0, msg))
-    handler.wfile.flush()
-    return True
-
-
 class _BufWFile:
     """替身 wfile · 让三条 stream_*_to_anthropic 在 stream=False 时把 SSE 写进内存,
     随后由 collect_sse_to_message 聚合成一个 anthropic Message JSON。
@@ -1152,18 +1130,16 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
 
     msg_id = f"msg_{uuid.uuid4().hex[:16]}"
     handler.wfile.write(emit_message_start(msg_id, model_name))
-    # 图文剥离警告 · 若前置剥了图 · 首帧就打开 text block 0 + 写 warning delta
-    stripped_warned = _write_stripped_images_warning(handler)
     # 以下所有 emit 状态放外层 · 首帧前重试时"回滚状态"= 保持 emitted_any=False + tool_state 空
     # 首帧后异常 → 保护关闭路径(不回滚)
-    text_block_started = stripped_warned
+    text_block_started = False
     text_block_stopped = False
     tool_state: dict[int, dict] = {}
     next_block_idx = 1
     stop_reason = "end_turn"
     output_tokens = 0
     input_tokens = 0
-    emitted_any = stripped_warned   # 是否已经吐出任何用户可见 delta(text / tool_use start / tool_input) · 决定能否重试
+    emitted_any = False   # 是否已经吐出任何用户可见 delta(text / tool_use start / tool_input) · 决定能否重试
     # <think>...</think> 流式过滤状态(DeepSeek-V4 在 content 里塞思维链标签)
     think_state = {"in_think": False, "buf": "", "mode": None}
     reasoning_mode = _reasoning_mode()
@@ -1392,7 +1368,7 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
 
     def _run_tail_with_retry(upstream_id, url, headers, payload, initial_error: _Upstream429 | None = None) -> None:
         """链尾候选的重试外层 · 完整保留改造前 openai 的 while-True 重试/保护关闭语义。"""
-        nonlocal emitted_any
+        nonlocal emitted_any, think_state, next_block_idx
         attempts = 0
         retry_attempts = 0
         if initial_error is not None:
@@ -1421,6 +1397,10 @@ def stream_openai_to_anthropic(handler: "ProxyHandler", model_name: str, model: 
             except _STREAM_RETRY_EXC as e:
                 if not emitted_any and attempts <= STREAM_MAX_RETRIES:
                     _log(f"[WARN] openai stream break before first byte · {type(e).__name__}: {e} · retry {attempts}/{STREAM_MAX_RETRIES}")
+                    # 丢弃本次尚未输出的解析状态，避免混入重试响应。
+                    think_state = {"in_think": False, "buf": "", "mode": None}
+                    tool_state.clear()
+                    next_block_idx = 1
                     continue
                 # 首帧已 emit → 返回错误,禁止重放及成功结束
                 _log(f"[ERROR] openai stream break after emit(attempts={attempts}) · {type(e).__name__}: {e}")
@@ -1539,9 +1519,7 @@ def stream_responses_to_anthropic(handler: "ProxyHandler", model_name: str, mode
     msg_id = f"msg_{uuid.uuid4().hex[:16]}"
     estimated_input_tokens = estimate_input_tokens(body_original)
     handler.wfile.write(emit_message_start(msg_id, model_name, estimated_input_tokens))
-    # 图文剥离警告 · 若剥了图 · 此 helper 已开 block 0 并写 warning · 跳过下面自己的 block_start(0)
-    if not _write_stripped_images_warning(handler):
-        handler.wfile.write(emit_content_block_start(0))
+    handler.wfile.write(emit_content_block_start(0))
     handler.wfile.flush()
     output_tokens = 0
     input_tokens = 0
@@ -1926,14 +1904,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 "type": "not_found_error", "message": f"model not configured: {model_name}"}})
             return
 
-        # 图文能力守卫:m.supports_images=false 时剥掉 body.messages 里所有 image · 记录数量
-        # · 触发场景 · 上一轮 CC 会话带截图(png/jpg base64)· 本轮换到 GLM/DeepSeek 等纯文本模型
-        # · 不剥图 → 上游 400「模型服务调用失败」(见 dumps/req_*_GLM-*.json msg[N] image_url)
-        # · dcc 明文提示 · 首个 assistant text_delta 前注入一段 warning
+        # 新图片必须由支持图片的模型处理；历史图片只过滤，不注入回答。
+        incoming = body.get("messages") or []
+        if incoming and incoming[-1].get("role") == "user":
+            latest = {"messages": [dict(incoming[-1])]}
+            if _strip_images_if_unsupported(latest, m):
+                _usage_error("invalid_request_error")
+                self._send_json(400, {"type": "error", "error": {
+                    "type": "invalid_request_error",
+                    "message": f"当前模型 {m.get('upstream_id', model_name)} 不支持图片输入，"
+                               "请切换到支持图片的模型后重试。"}})
+                return
         stripped_imgs = _strip_images_if_unsupported(body, m)
-        self._dcc_stripped_imgs = stripped_imgs  # stream_*_to_anthropic 通过 handler 拿 · 首帧插 warning
-        self._dcc_slot = m.get("slot", "?")
-        self._dcc_upstream = m.get("upstream_id", "?")
         if stripped_imgs > 0:
             _log(f"[WARN] slot={m.get('slot')} upstream={m.get('upstream_id')} 不支持图文 · 已剥离 {stripped_imgs} 张图片")
             _tl("image_stripped", req_id=req_id, slot=m.get("slot"), upstream_id=m.get("upstream_id"), count=stripped_imgs)
