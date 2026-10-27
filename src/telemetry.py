@@ -33,7 +33,7 @@ class Telemetry:
 
     def _connect(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path, timeout=0.1)
+        conn = sqlite3.connect(self.path, timeout=1)
         try:
             conn.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)')
             conn.execute('CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, ts INTEGER, body TEXT)')

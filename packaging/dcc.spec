@@ -13,10 +13,10 @@ a = Analysis([str(root / 'packaging/entry.py')], pathex=[str(root), str(root / '
              binaries=[], datas=assets, hiddenimports=['src.proxy_server'],
              hookspath=[], hooksconfig={}, runtime_hooks=[], excludes=[])
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='DCC' if mac else 'DCC-panel',
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='DCC-panel',
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
           console=False, icon=icon)
-cli = EXE(pyz, a.scripts, [], exclude_binaries=True, name='dcc-cli' if mac else 'dcc',
+cli = EXE(pyz, a.scripts, [], exclude_binaries=True, name='dcc',
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
           console=True, icon=icon)
 collection = COLLECT(exe, cli, a.binaries, a.datas, strip=False, upx=False, name='DCC')

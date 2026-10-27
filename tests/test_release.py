@@ -123,14 +123,15 @@ class ReleaseTests(unittest.TestCase):
             server.server_close.assert_called_once()
             self.assertFalse((Path(temp) / 'panel.json').exists())
 
-    def test_frozen_windows_gui_uses_console_helper_for_proxy(self):
+    def test_frozen_gui_uses_console_helper_for_proxy(self):
         from unittest.mock import MagicMock
         from src import proxy
         import sys
         for frozen, system, executable in (
                 (True, 'win32', '/application/DCC-panel.exe'),
                 (True, 'win32', '/application/dcc.exe'),
-                (True, 'darwin', '/application/DCC'),
+                (True, 'darwin', '/application/DCC-panel'),
+                (True, 'darwin', '/application/dcc'),
                 (False, sys.platform, sys.executable)):
             with self.subTest(frozen=frozen, system=system), tempfile.TemporaryDirectory() as temp, \
                     patch.dict(os.environ, {'DCC_DATA_DIR': temp}):
@@ -144,7 +145,7 @@ class ReleaseTests(unittest.TestCase):
                     proxy.start(cfg, fixed_port=True)
                 args = launch.call_args.args[0]
                 if frozen:
-                    expected = str(Path(executable).with_name('dcc.exe')) if system == 'win32' else executable
+                    expected = str(Path(executable).with_name('dcc.exe' if system == 'win32' else 'dcc'))
                     self.assertEqual(args, [expected, '--serve-proxy', str(cfg.proxy_config_path)])
                 else:
                     self.assertEqual(args, [executable, str(Path(proxy.__file__).parent / 'proxy_server.py'), str(cfg.proxy_config_path)])

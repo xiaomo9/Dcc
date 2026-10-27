@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import sys
 import threading
 import urllib.request
 import webbrowser
@@ -9,6 +10,25 @@ import webbrowser
 from .app_paths import config_path, data_dir
 from .platform_support import fcntl, pid_alive
 from .ui import ConfigEditor, create_server
+
+
+def _configure_terminal():
+    from tkinter import messagebox
+    from .shell_setup import configure_path, profile_path
+
+    executable = Path(sys.executable).with_name('dcc')
+    try:
+        profile = profile_path()
+        if not messagebox.askyesno('配置 dcc 终端命令',
+                f'将向以下文件添加 DCC 的 Path 配置：\n{profile}\n\n'
+                f'命令目录：\n{executable.parent}\n\n'
+                '请先将 DCC 放到固定安装位置（如“应用程序”）。是否继续？'):
+            return
+        configure_path(executable, profile)
+        messagebox.showinfo('配置完成', '请重新打开终端，即可使用 dcc 2、dcc list 等命令。')
+    except (OSError, UnicodeError, ValueError):
+        messagebox.showerror('终端配置失败',
+                f'无法自动配置。请检查 shell 配置文件和权限，或手动将以下目录加入 Path：\n{executable.parent}')
 
 
 def run():
@@ -54,6 +74,9 @@ def run():
         window.resizable(False, False)
         tk.Label(window, text="DCC 配置面板已启动", font=("", 17)).pack(pady=(22, 12))
         tk.Button(window, text="打开配置面板", command=lambda: webbrowser.open(url)).pack()
+        if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
+            window.geometry("380x220")
+            tk.Button(window, text="配置 dcc 终端命令…", command=_configure_terminal).pack(pady=(10, 0))
         tk.Label(window, text="关闭此窗口会关闭面板，代理继续运行。\n停止代理请使用面板中的「停止全部」。").pack(pady=12)
         window.deiconify()
         webbrowser.open(url)

@@ -113,8 +113,7 @@ def _start_locked(cfg: DccConfig, *, fixed_port: bool = False) -> int:
     server_py = Path(__file__).parent / "proxy_server.py"
     _trim_proxy_log(cfg.proxy_log)
     if getattr(sys, "frozen", False):
-        executable = (str(Path(sys.executable).with_name("dcc.exe"))
-                      if sys.platform == "win32" else sys.executable)
+        executable = str(Path(sys.executable).with_name("dcc.exe" if sys.platform == "win32" else "dcc"))
         cmd = [executable, "--serve-proxy", str(cfg.proxy_config_path)]
     else:
         cmd = [sys.executable, str(server_py), str(cfg.proxy_config_path)]

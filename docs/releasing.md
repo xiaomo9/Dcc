@@ -17,7 +17,7 @@ macOS 输出 `dist/DCC.app`；Windows 输出 `dist/DCC/DCC-panel.exe`。双击�
 
 Windows 命令行入口为安装目录中的 `dcc.exe`。安装或升级时可勾选「将 dcc 添加到当前用户 Path」，每次默认不勾选；选中后才添加目录，重新打开终端即可使用 `dcc 2`、`dcc status` 等原有命令。未勾选或添加失败时，完成页会提示用户手动加入 Path，并显示实际安装目录；图形面板仍可正常使用。取消勾选不会移除已存在的 Path 项。桌面和开始菜单快捷方式仍名为 DCC，打开图形面板。升级会移除旧的 `dcc-cli.exe`，卸载仅移除由安装程序添加的 Path 项，保留其他路径及用户自行添加的项。
 
-macOS 命令行入口仍位于 `DCC.app/Contents/MacOS/dcc-cli`，不修改 shell 配置或 PATH。
+macOS 命令行入口统一为 `DCC.app/Contents/MacOS/dcc`，图形入口为 `DCC-panel`，应用名称仍是 DCC。先将 App 放到固定安装位置，然后点击启动窗口的“配置 dcc 终端命令…”。确认后才在当前用户的 shell 启动文件中添加有标记的 Path 配置，支持 zsh（`.zshrc`，遵循 `ZDOTDIR`）和 bash（已有的 `.bash_profile`、`.bash_login` 或 `.profile`，没有则创建 `.bash_profile`）。保留已有内容和文件权限，重复配置不重复写入；取消或启动 App 本身不会修改 shell 配置。重新打开终端后可直接运行 `dcc 2`；不配置时可使用完整路径 `/Applications/DCC.app/Contents/MacOS/dcc 2`。若移动 App，需从新位置重新配置；删除 App 后可手动移除 shell 文件中 `DCC PATH` 标记之间的配置块。
 
 Windows 需另外安装 Inno Setup 6，再运行 `ISCC /DAppVersion=<版本号> packaging/windows.iss` 生成安装程序。macOS DMG 生成步骤见 `.github/workflows/release.yml`。
 
